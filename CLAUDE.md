@@ -157,7 +157,7 @@ python3 examples/llm_demo.py           # LLM tactics + LLM critic (offline, scri
 - [x] LLM layer: Claude-backed tactics + adversarial LLM critic (`tactics.llm`).
 - [ ] Playbook: focumate (Rails + Swift) — harden, bug-hunt, contract-check.
 - [ ] Playbook: trading — alerts, shift/buy/sell against a goal.
-- [ ] Playbook: lead-finder — score bad sites, draft + send outreach.
+- [x] Playbook: lead-finder — score bad sites, draft + send outreach (`playbooks/lead_finder.py`, dry-run by default).
 - [ ] Playbook: gift-cards — production-readiness checks.
 
 Build them one at a time. Each new playbook should leave this checklist and the
