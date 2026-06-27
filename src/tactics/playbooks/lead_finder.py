@@ -25,8 +25,10 @@ the proxy — that's the difference between the right win and the quick win.
 
 from __future__ import annotations
 
+import csv
+import json
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Any, Callable
 
 from ..colony import Colony, FunctionCritic, FunctionPlanner, Verdict
 from ..core.approval import ApprovalGate, DryRun, Proposal
@@ -44,6 +46,102 @@ class Site:
     business: str
     # Observed weakness signals, e.g. {"no_https": True, "mobile_broken": True}.
     signals: dict[str, bool] = field(default_factory=dict)
+
+
+# --- loading your lead source (a file your tool produces) ---------------------
+
+_TRUE = {"1", "true", "t", "yes", "y", "x", "on"}
+_FALSE = {"", "0", "false", "f", "no", "n", "off", "none", "null"}
+
+
+def _truthy(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v != 0
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in _TRUE:
+            return True
+        if s in _FALSE:
+            return False
+        return bool(s)  # any other non-empty string counts as present
+    return bool(v)
+
+
+def _business_from_url(url: str) -> str:
+    host = url.split("//", 1)[-1].split("/", 1)[0].split("?", 1)[0]
+    host = host.removeprefix("www.")
+    name = host.split(":")[0].split(".")[0]
+    return name.replace("-", " ").replace("_", " ").title() or url
+
+
+def _record_to_site(rec: dict, url_field: str, business_field: str, signal_fields) -> Site | None:
+    url = str(rec.get(url_field, "")).strip()
+    if not url:
+        return None
+    business = str(rec.get(business_field) or "").strip() or _business_from_url(url)
+
+    signals: dict[str, bool] = {}
+    nested = rec.get("signals")
+    if isinstance(nested, dict):  # a JSON record that already nests signals
+        signals.update({str(k): _truthy(v) for k, v in nested.items()})
+    if signal_fields is not None:  # explicit list/dict of which columns are signals
+        mapping = signal_fields if isinstance(signal_fields, dict) else {f: f for f in signal_fields}
+        for src, name in mapping.items():
+            if src in rec:
+                signals[name] = _truthy(rec[src])
+    elif not signals:  # infer: extra boolean-ish columns become signals
+        skip = {url_field, business_field, "signals"}
+        for k, v in rec.items():
+            if k in skip:
+                continue
+            if isinstance(v, bool) or (isinstance(v, str) and v.strip().lower() in (_TRUE | _FALSE)):
+                signals[k] = _truthy(v)
+    return Site(url=url, business=business, signals=signals)
+
+
+def load_sites(
+    path: str,
+    *,
+    url_field: str = "url",
+    business_field: str = "business",
+    signal_fields=None,
+) -> list[Site]:
+    """Load candidate sites from your lead-source file into Site objects.
+
+    Supports ``.json`` (a list, or ``{"sites": [...]}``), ``.jsonl`` (one JSON
+    object per line), and ``.csv`` (header row). Each record needs at least a URL;
+    the business name is taken from ``business_field`` or derived from the domain.
+
+    Signals (the weakness flags the scorer reads) come from, in order:
+      * a nested ``signals`` object on the record, if present;
+      * ``signal_fields`` — a list of columns to treat as signals, or a
+        ``{column: signal_name}`` dict to rename them;
+      * otherwise, any extra boolean-ish columns are inferred as signals.
+
+    If your file is just URLs with no weakness data, load it anyway and use the
+    LLM scorer (``llm_scorer``), or add an audit step that fills in signals.
+    """
+    if path.endswith(".jsonl"):
+        records = []
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    records.append(json.loads(line))
+    elif path.endswith(".json"):
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        records = data["sites"] if isinstance(data, dict) and "sites" in data else data
+    elif path.endswith(".csv"):
+        with open(path, encoding="utf-8", newline="") as fh:
+            records = list(csv.DictReader(fh))
+    else:
+        raise ValueError(f"unsupported lead-source format: {path} (use .json/.jsonl/.csv)")
+
+    sites = [_record_to_site(r, url_field, business_field, signal_fields) for r in records]
+    return [s for s in sites if s is not None]
 
 
 @dataclass

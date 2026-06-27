@@ -11,6 +11,7 @@ from tactics.playbooks.lead_finder import (
     heuristic_scorer,
     llm_drafter,
     llm_scorer,
+    load_sites,
     template_drafter,
     win_clients,
 )
@@ -110,6 +111,49 @@ def test_llm_drafter_fails_closed_on_garbage():
 
     with pytest.raises(ValueError):
         llm_drafter(ScriptedClient(["not json — never send this"]))(STRONG)
+
+
+def test_load_sites_from_csv(tmp_path):
+    p = tmp_path / "leads.csv"
+    p.write_text(
+        "url,business,no_https,mobile_broken\n"
+        "http://a.example,Alpha,true,yes\n"
+        "http://b.example,,0,1\n",
+        encoding="utf-8",
+    )
+    sites = load_sites(str(p))
+    assert len(sites) == 2
+    assert sites[0].business == "Alpha"
+    assert sites[0].signals == {"no_https": True, "mobile_broken": True}
+    assert sites[1].business == "B"  # derived from the domain
+    assert sites[1].signals == {"no_https": False, "mobile_broken": True}
+
+
+def test_load_sites_from_jsonl_with_nested_signals(tmp_path):
+    p = tmp_path / "leads.jsonl"
+    p.write_text(
+        '{"url": "http://x.example", "business": "X Co", "signals": {"slow": true}}\n'
+        '{"url": "http://y.example"}\n',
+        encoding="utf-8",
+    )
+    sites = load_sites(str(p))
+    assert sites[0].signals == {"slow": True}
+    assert sites[1].business == "Y"
+
+
+def test_load_sites_json_with_field_overrides(tmp_path):
+    p = tmp_path / "leads.json"
+    p.write_text(
+        '[{"domain": "http://z.example", "name": "Z Co", "ssl": "false", "mobile": "ok"}]',
+        encoding="utf-8",
+    )
+    sites = load_sites(
+        str(p), url_field="domain", business_field="name",
+        signal_fields={"ssl": "no_https", "mobile": "mobile_broken"},
+    )
+    assert sites[0].url == "http://z.example"
+    assert sites[0].business == "Z Co"
+    assert sites[0].signals == {"no_https": False, "mobile_broken": True}
 
 
 def test_colony_with_llm_seams_and_budget():
