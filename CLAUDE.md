@@ -133,6 +133,20 @@ python3 examples/safety_demo.py        # see budgets, the approval gate, the jou
 python3 examples/llm_demo.py           # LLM tactics + LLM critic (offline, scripted)
 ```
 
+## Known limitations (audited, accepted for now)
+
+- **Recency + persistence don't combine yet.** `RecencyStore` is in-memory only;
+  `JsonStore` doesn't decay. Trading (non-stationary *and* persistent) will want
+  a persistent recency store — build it with the trading playbook.
+- **`JsonStore` flushes on every `record`.** Atomic and safe, but O(n) per write;
+  fine for thousands of entries, revisit for very large memories.
+- **`ScriptedClient` isn't thread-safe** (its response index races). It's a
+  test/demo helper — run LLM colony demos with `max_workers=1`. `ClaudeClient`
+  (the production path) is fine in parallel.
+- **The single `Agent` loop isolates tactic errors but not `observe()`/goal-predicate
+  errors.** The `Colony` (the production path) isolates everything. Keep `Target.observe`
+  and `Goal.is_satisfied` total/non-throwing.
+
 ## Status
 
 - [x] Core loop, memory (in-memory + JSON), UCB + epsilon-greedy policies, tests.

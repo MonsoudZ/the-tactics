@@ -33,7 +33,7 @@ from ..core.outcome import Outcome
 from ..core.policy import Policy, UCBPolicy
 from ..core.tactic import Tactic
 from .blackboard import Blackboard, Finding, Task
-from .critic import AcceptCritic, Critic
+from .critic import AcceptCritic, Critic, Verdict
 
 
 @dataclass
@@ -144,6 +144,13 @@ class Colony:
 
     # --- retry / give-up -----------------------------------------------------
 
+    def _verify(self, outcome: Outcome, ctx: Context) -> Verdict:
+        try:
+            return self.critic.verify(outcome, ctx)
+        except Exception as exc:  # fail-closed: a broken critic rejects, never rubber-stamps
+            self.journal.record("error", stage="critic", error=repr(exc))
+            return Verdict(accepted=False, reason=f"critic error: {exc!r}")
+
     def _retry_or_fail(self, task: Task, outcome: Outcome | None) -> None:
         if self.budget and self.budget.attempts_exceeded(task.attempts):
             self.board.fail(task, outcome)
@@ -163,7 +170,10 @@ class Colony:
                 result.stop_reason = self.budget.reason() or "budget exhausted"
                 break
 
-            self.planner.plan(goal, self.board, self.target)
+            try:
+                self.planner.plan(goal, self.board, self.target)
+            except Exception as exc:  # a broken planner degrades, doesn't crash the swarm
+                self.journal.record("error", stage="planner", error=repr(exc))
 
             if self._goal_met(goal):
                 result.satisfied = True
@@ -191,7 +201,7 @@ class Colony:
                     self.board.fail(r.task)  # nothing could act on it — permanent
                     continue
 
-                verdict = self.critic.verify(r.outcome, r.ctx)
+                verdict = self._verify(r.outcome, r.ctx)
                 self.journal.record(
                     "verify", task=r.task.id, tactic=r.tactic.name,
                     accepted=verdict.accepted, reason=verdict.reason,

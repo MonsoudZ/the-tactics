@@ -30,7 +30,11 @@ class Budget:
     _start: float | None = field(default=None, init=False, repr=False)
 
     def start(self) -> None:
-        self._start = self.clock()
+        # Idempotent: a Budget is a fixed allowance for its lifetime, so the clock
+        # anchors on first use and cost accumulates across runs. For per-run limits,
+        # construct a fresh Budget per run.
+        if self._start is None:
+            self._start = self.clock()
 
     def spend(self, amount: float) -> None:
         self._spent += max(0.0, amount)
