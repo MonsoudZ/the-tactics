@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from tactics import AutoApprove, DryRun, InMemoryStore
+from tactics import AutoApprove, Budget, DryRun, InMemoryStore
+from tactics.llm import ScriptedClient
 from tactics.playbooks.lead_finder import (
     LeadFinder,
     Site,
     build_colony,
     heuristic_scorer,
+    llm_drafter,
+    llm_scorer,
     template_drafter,
     win_clients,
 )
@@ -80,3 +83,42 @@ def test_learning_is_recorded_for_verified_leads():
     entries = list(memory.entries())
     assert entries
     assert all(e.tactic == "work_lead" for e in entries)
+
+
+# --- LLM seams (offline via ScriptedClient) ----------------------------------
+
+
+def test_llm_scorer_parses_and_clamps():
+    score = llm_scorer(ScriptedClient(['{"weakness": 1.5, "reason": "broken"}']))
+    assert score(STRONG) == 1.0  # clamped into [0, 1]
+
+
+def test_llm_scorer_fails_soft_to_zero():
+    score = llm_scorer(ScriptedClient(["the model said no json"]))
+    assert score(STRONG) == 0.0  # hiccup skips the lead, doesn't crash
+
+
+def test_llm_drafter_parses_and_charges_tokens():
+    client = ScriptedClient(['{"subject": "S", "body": "B", "quality": 0.9}'])
+    draft = llm_drafter(client)(STRONG)
+    assert draft.subject == "S" and draft.body == "B" and draft.quality == 0.9
+    assert draft.cost > 0  # tokens flow into the Budget
+
+
+def test_llm_drafter_fails_closed_on_garbage():
+    import pytest
+
+    with pytest.raises(ValueError):
+        llm_drafter(ScriptedClient(["not json — never send this"]))(STRONG)
+
+
+def test_colony_with_llm_seams_and_budget():
+    target = LeadFinder([STRONG])
+    scorer = llm_scorer(ScriptedClient(['{"weakness": 0.9, "reason": "weak"}']))
+    drafter = llm_drafter(ScriptedClient(['{"subject": "Fix your site", "body": "...", "quality": 0.8}']))
+    budget = Budget(max_cost=10_000)
+    result = build_colony(target, scorer=scorer, drafter=drafter, budget=budget).run(win_clients())
+    done = [f for f in result.findings if f.kind == "task_done"]
+    assert len(done) == 1
+    assert budget.spent > 0  # LLM drafting tokens were charged
+

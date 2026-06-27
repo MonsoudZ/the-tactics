@@ -51,6 +51,7 @@ class Draft:
     subject: str
     body: str
     quality: float  # 0..1 self-rated strength of the hook
+    cost: float = 0.0  # tokens spent drafting (flows into Budget); 0 for templates
 
 
 # --- default seams (offline, no LLM, no network) -----------------------------
@@ -76,6 +77,90 @@ def template_drafter(site: Site) -> Draft:
     )
     quality = min(1.0, 0.4 + 0.2 * len(issues))
     return Draft(subject=subject, body=body, quality=round(quality, 3))
+
+
+# --- LLM seams (Claude judges weakness and writes the hook) -------------------
+#
+# Same callable shape as the heuristics, so they drop straight into build_colony.
+# Offline-testable: pass a ScriptedClient. Live: pass ClaudeClient() (needs a key).
+
+
+def llm_scorer(client, *, max_tokens: int = 512) -> Callable[[Site], float]:
+    """Build a scorer that asks the model how good a lead the site is.
+
+    Fail-soft: a malformed/failed response scores 0.0 (skip the lead), never
+    crashes the run — a transient hiccup shouldn't blow up the swarm.
+    """
+    from ..llm.client import extract_json  # local import keeps anthropic optional
+
+    schema = {
+        "type": "object",
+        "properties": {"weakness": {"type": "number"}, "reason": {"type": "string"}},
+        "required": ["weakness", "reason"],
+        "additionalProperties": False,
+    }
+    system = (
+        "You qualify sales leads for a web-improvement service. A weak, broken, "
+        "insecure, or outdated site is a STRONG lead. Respond ONLY with JSON."
+    )
+
+    def score(site: Site) -> float:
+        prompt = (
+            f"Business: {site.business}\nURL: {site.url}\n"
+            f"Observed signals: {site.signals}\n\n"
+            'How good a lead is this? Return {"weakness": <0..1>, "reason": "<short>"}.'
+        )
+        try:
+            resp = client.complete(prompt, system=system, schema=schema, max_tokens=max_tokens)
+            data = extract_json(resp.text)
+            return max(0.0, min(1.0, float(data.get("weakness", 0.0))))
+        except (ValueError, KeyError, TypeError):
+            return 0.0
+
+    return score
+
+
+def llm_drafter(client, *, max_tokens: int = 1024) -> Callable[[Site], Draft]:
+    """Build a drafter that asks the model for a specific, credible outreach hook.
+
+    Fail-closed: a malformed response raises, so the colony's failure isolation
+    turns it into a loss and **no broken email is ever proposed for sending**.
+    Drafting tokens are reported as the Draft's cost, so a Budget caps spend.
+    """
+    from ..llm.client import extract_json
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "subject": {"type": "string"},
+            "body": {"type": "string"},
+            "quality": {"type": "number"},
+        },
+        "required": ["subject", "body", "quality"],
+        "additionalProperties": False,
+    }
+    system = (
+        "You write concise, specific, credible cold outreach to win web-services "
+        "clients. Never generic or spammy. Respond ONLY with JSON."
+    )
+
+    def draft(site: Site) -> Draft:
+        issues = ", ".join(k.replace("_", " ") for k, v in site.signals.items() if v) or "unclear"
+        prompt = (
+            f"Write cold outreach to win {site.business} as a web-services client.\n"
+            f"Their site issues: {issues}\n\n"
+            'Return {"subject": "...", "body": "...", "quality": <0..1 self-rating>}.'
+        )
+        resp = client.complete(prompt, system=system, schema=schema, max_tokens=max_tokens)
+        data = extract_json(resp.text)  # raises on garbage -> fail closed
+        return Draft(
+            subject=str(data["subject"]),
+            body=str(data["body"]),
+            quality=max(0.0, min(1.0, float(data.get("quality", 0.5)))),
+            cost=float(resp.tokens),
+        )
+
+    return draft
 
 
 # --- target ------------------------------------------------------------------
@@ -142,6 +227,7 @@ class WorkLead(Tactic):
         return Outcome(
             success=True,
             reward=reward,
+            cost=draft.cost,  # LLM drafting tokens (0 for the template drafter)
             metrics={
                 "weakness": round(weakness, 3),
                 "quality": draft.quality,
