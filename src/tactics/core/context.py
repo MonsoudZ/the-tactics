@@ -32,6 +32,11 @@ class Context:
     # When a Colony worker runs a tactic, the Task it's working is attached here.
     # Typed loosely so the domain-free core never imports the colony layer.
     task: Any = None
+    # The approval gate a tactic must pass an irreversible action through, and the
+    # journal it can write to. Injected by the Agent/Colony; safe to ignore in
+    # pure-computation tactics.
+    gate: Any = None
+    journal: Any = None
 
     def signature(self) -> str:
         """Stable key for the learning bucket this context belongs to.

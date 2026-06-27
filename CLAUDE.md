@@ -53,8 +53,26 @@ Many ants over a shared board, coordinating by pheromones. Built on the core loo
 
 Important: the Critic gates **learning and task-completion**, not a side effect a
 tactic already performed. For irreversible/outward-facing actions (deploy, send,
-sell), write the tactic to *propose* and let the Critic (or a human-approval hook)
-gate the commit. Use `max_workers=1` for deterministic runs/tests.
+sell), write the tactic to *propose* and let the **approval gate** (below) commit.
+Use `max_workers=1` for deterministic runs/tests.
+
+### The trust layer (v0.3) — safety, control, observability, adaptation
+
+All domain-free, all defaults backward-compatible (no Budget = no caps, gate
+defaults to `AutoApprove`, a Journal is always attached).
+
+| Concern | File | What it does |
+|---------|------|--------------|
+| **Failure isolation** | `core/engine.py`, `colony/colony.py` | A tactic that raises becomes `Outcome.failed` (a loss), logged — it never crashes the loop or the parallel swarm. |
+| **Budgets / limits** | `core/budget.py` | Caps `max_cost` (sum of `Outcome.cost`), `max_seconds` (wall-clock), and `max_attempts_per_task` (colony gives up on a stuck task). The governor against runaway autonomy. |
+| **Approval gate** | `core/approval.py` | `Proposal` + gates: `AutoApprove`, `DryRun` (review-only), `CallbackGate` (human hook), `PolicyGate` (auto-approve reversible/low-risk, escalate the rest). Tactics call `ctx.gate.submit(proposal, ctx)` to commit irreversible actions. |
+| **Audit journal** | `core/journal.py` | Ordered, thread-safe event log (`step`, `verify`, `gate.commit/hold`, `error`…). `result.journal.explain()` answers "why did it do that?". |
+| **Adaptive memory** | `core/memory.py` `RecencyStore` | Recency-weighted stats for non-stationary worlds (trading regimes, changing code). Old experience decays so the mean tracks what works *now*. |
+
+**Reward vs cost vs risk** — three separate axes a tactic reports honestly:
+`reward` = how well it served the goal (learning signal); `cost` = what it
+consumed (drives the Budget); risk/reversibility = declared on the `Proposal` so
+the gate can decide. Don't conflate them.
 
 ## How to add a new domain (a "playbook")
 
@@ -91,9 +109,10 @@ Copy `examples/lead_finder_demo.py` as the canonical shape.
 
 ```bash
 python3 -m pip install -e .            # install (editable)
-python3 -m pytest                      # run tests (keep green — 30 tests)
+python3 -m pytest                      # run tests (keep green — 43 tests)
 python3 examples/lead_finder_demo.py   # see the single loop learn
 python3 examples/swarm_demo.py         # see the colony swarm, verify, reinforce
+python3 examples/safety_demo.py        # see budgets, the approval gate, the journal
 ```
 
 ## Status
@@ -102,6 +121,7 @@ python3 examples/swarm_demo.py         # see the colony swarm, verify, reinforce
 - [x] Generalization across situations (`SimilarityEstimator`).
 - [x] Delayed credit assignment (`DiscountedReturn`).
 - [x] Colony layer: blackboard + pheromones, planner, critic, parallel swarm.
+- [x] Trust layer: failure isolation, budgets, approval gate, journal, recency memory.
 - [ ] Playbook: focumate (Rails + Swift) — harden, bug-hunt, contract-check.
 - [ ] Playbook: trading — alerts, shift/buy/sell against a goal.
 - [ ] Playbook: lead-finder — score bad sites, draft + send outreach.

@@ -22,16 +22,22 @@ class Outcome:
 
     success: bool
     reward: float = 0.0
+    cost: float = 0.0  # what this attempt consumed (money, API calls, time…) — drives Budget
     metrics: dict[str, Any] = field(default_factory=dict)
     notes: str = ""
 
     @classmethod
-    def win(cls, reward: float = 1.0, **metrics: Any) -> "Outcome":
-        return cls(success=True, reward=reward, metrics=metrics)
+    def win(cls, reward: float = 1.0, *, cost: float = 0.0, **metrics: Any) -> "Outcome":
+        return cls(success=True, reward=reward, cost=cost, metrics=metrics)
 
     @classmethod
-    def loss(cls, reward: float = 0.0, **metrics: Any) -> "Outcome":
-        return cls(success=False, reward=reward, metrics=metrics)
+    def loss(cls, reward: float = 0.0, *, cost: float = 0.0, **metrics: Any) -> "Outcome":
+        return cls(success=False, reward=reward, cost=cost, metrics=metrics)
+
+    @classmethod
+    def failed(cls, error: BaseException, *, cost: float = 0.0) -> "Outcome":
+        """A tactic that raised. Counts as a loss the colony can learn to avoid."""
+        return cls(success=False, reward=0.0, cost=cost, notes=f"error: {error!r}")
 
     def __str__(self) -> str:  # pragma: no cover - cosmetic
         flag = "win " if self.success else "loss"

@@ -110,6 +110,40 @@ class InMemoryStore:
         return out
 
 
+class RecencyStore(InMemoryStore):
+    """Recency-weighted store for *non-stationary* worlds (markets shift, code changes).
+
+    Before adding each new observation, the existing stats for that (situation,
+    tactic) are scaled by ``decay`` (0..1). So old experience fades and the mean
+    tracks what's working *now*, with an effective window of ~ 1/(1-decay)
+    observations. ``trials`` becomes a fractional "effective count" — the policy
+    and estimators already handle that.
+    """
+
+    def __init__(self, decay: float = 0.9) -> None:
+        super().__init__()
+        if not 0.0 < decay <= 1.0:
+            raise ValueError("decay must be in (0, 1]")
+        self.decay = decay
+
+    def record(
+        self,
+        tactic_name: str,
+        signature: str,
+        *,
+        reward: float,
+        success: bool,
+        features: dict[str, Any] | None = None,
+        goal: str | None = None,
+    ) -> None:
+        st = self._table.setdefault((signature, tactic_name), TacticStats())
+        st.trials = st.trials * self.decay + 1
+        st.successes = st.successes * self.decay + (1 if success else 0)
+        st.total_reward = st.total_reward * self.decay + reward
+        if features is not None or goal is not None:
+            self._meta[signature] = (features or {}, goal)
+
+
 class JsonStore(InMemoryStore):
     """Persistent store backed by a JSON file. Experience survives restarts."""
 

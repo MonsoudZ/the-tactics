@@ -54,13 +54,30 @@ Two more brain upgrades, both pluggable:
 - **Delayed credit assignment** (`DiscountedReturn`) — when the payoff comes
   later (a buy that sets up a sell), the moves that earned it get the credit.
 
+## Trust layer (so it's safe to point at real systems)
+
+Autonomy you can actually turn loose — all domain-free, all off by default:
+
+- **Failure isolation** — a tactic that throws becomes a logged loss, never a
+  crash that takes down the swarm.
+- **Budgets** (`Budget`) — cap total cost, wall-clock time, and retries per task.
+  The governor against runaway loops or spend.
+- **Approval gate** (`Proposal` + `AutoApprove`/`DryRun`/`CallbackGate`/`PolicyGate`)
+  — irreversible actions (deploy, send, sell) must pass a gate before they fire.
+  Swap the gate to go from review-only to human-approved to fully autonomous.
+- **Audit journal** (`Journal`) — every decision recorded; `result.journal.explain()`
+  answers "why did it do that?".
+- **Adaptive memory** (`RecencyStore`) — for worlds that change (markets, code),
+  old experience decays so it tracks what works *now*.
+
 ## Quickstart
 
 ```bash
 python3 -m pip install -e .
-python3 -m pytest                      # 30 tests, all green
+python3 -m pytest                      # 43 tests, all green
 python3 examples/lead_finder_demo.py   # one ant learns the winning email
 python3 examples/swarm_demo.py         # a colony hardens a service in parallel
+python3 examples/safety_demo.py        # budgets, approval gate, audit journal
 ```
 
 The lead demo gives three cold-email tactics hidden reply-rates the agent can't
@@ -107,7 +124,8 @@ adding a domain. See `src/tactics/core/` for the (heavily commented) contracts.
 
 ```
 src/tactics/core/        the domain-free engine (Goal, Target, Tactic, Outcome,
-                         Policy, Estimator, CreditAssigner, Memory, Agent)
+                         Policy, Estimator, CreditAssigner, Memory, Agent) plus the
+                         trust layer (Budget, ApprovalGate, Journal, RecencyStore)
 src/tactics/colony/      the swarm layer (Blackboard, Planner, Critic, Colony)
 src/tactics/playbooks/   one module per real use case (add yours here)
 examples/                runnable demos
@@ -116,7 +134,8 @@ tests/                   pytest suite — keep it green
 
 ## Status
 
-Core engine + colony layer are built, tested (30 tests), and proven to learn —
-including generalization across situations and delayed credit. Domain playbooks
-(focumate, trading, lead-finder, gift-cards) are next — built one at a time, each
-slotting into the same loop. Progress tracked in `CLAUDE.md`.
+Core engine + colony + trust layer are built, tested (43 tests), and proven to
+learn — generalization across situations, delayed credit, budgets, an approval
+gate, an audit journal, and recency-weighted memory. Domain playbooks (focumate,
+trading, lead-finder, gift-cards) are next — built one at a time, each slotting
+into the same loop. Progress tracked in `CLAUDE.md`.
