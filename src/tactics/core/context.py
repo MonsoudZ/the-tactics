@@ -29,6 +29,9 @@ class Context:
     goal: "Goal"
     data: dict[str, Any] = field(default_factory=dict)
     features: dict[str, Any] = field(default_factory=dict)
+    # When a Colony worker runs a tactic, the Task it's working is attached here.
+    # Typed loosely so the domain-free core never imports the colony layer.
+    task: Any = None
 
     def signature(self) -> str:
         """Stable key for the learning bucket this context belongs to.

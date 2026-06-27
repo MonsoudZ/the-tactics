@@ -5,11 +5,13 @@
         keep the applicable tactics
         let the policy choose one
         execute it                  -> Outcome
-        record the outcome in memory (this is the learning)
+        buffer the step; the CreditAssigner decides when it becomes learning
 
 The Agent owns no domain knowledge. Give it a Target, a set of Tactics, a Policy,
-and a Memory, then call ``pursue(goal)``. Run it again and again — each run starts
-smarter because Memory carried the lessons forward.
+a CreditAssigner, and a Memory, then call ``pursue(goal)``. With the default
+:class:`ImmediateCredit` it learns online (every step). Swap in
+:class:`DiscountedReturn` and it learns from delayed payoff across episodes —
+each ``pursue`` call is one episode.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from .context import Context
+from .credit import CreditAssigner, ImmediateCredit, Record, TrajectoryStep
 from .goal import Goal
 from .memory import InMemoryStore, MemoryStore
 from .outcome import Outcome
@@ -64,6 +67,7 @@ class Agent:
         tactics: Sequence[Tactic],
         policy: Policy | None = None,
         memory: MemoryStore | None = None,
+        credit: CreditAssigner | None = None,
         max_steps: int = 50,
     ) -> None:
         if not tactics:
@@ -72,6 +76,7 @@ class Agent:
         self.tactics = list(tactics)
         self.policy = policy or UCBPolicy()
         self.memory = memory or InMemoryStore()
+        self.credit = credit or ImmediateCredit()
         self.max_steps = max_steps
 
     def _context(self, goal: Goal) -> Context:
@@ -79,8 +84,16 @@ class Agent:
         features = self.target.features(data)
         return Context(target=self.target, goal=goal, data=data, features=features)
 
+    def _write(self, records: list[Record]) -> None:
+        for r in records:
+            self.memory.record(
+                r.tactic, r.signature, reward=r.value, success=r.success,
+                features=r.features, goal=r.goal,
+            )
+
     def pursue(self, goal: Goal) -> RunResult:
         result = RunResult(goal=goal)
+        trajectory: list[TrajectoryStep] = []
         for i in range(self.max_steps):
             ctx = self._context(goal)
             if goal.satisfied_by(ctx):
@@ -92,11 +105,14 @@ class Agent:
             tactic = self.policy.choose(applicable, ctx, self.memory)
             outcome = tactic.execute(ctx)
             sig = ctx.signature()
-            self.memory.record(
-                tactic.name, sig, reward=outcome.reward, success=outcome.success
+            tstep = TrajectoryStep(
+                signature=sig, features=ctx.features, goal=goal.name,
+                tactic=tactic.name, reward=outcome.reward, success=outcome.success,
             )
+            trajectory.append(tstep)
+            self._write(self.credit.on_step(tstep))  # online learning (if any)
             result.steps.append(Step(i, tactic.name, outcome, sig))
         else:
-            # loop finished without break — re-check satisfaction one last time
             result.satisfied = goal.satisfied_by(self._context(goal))
+        self._write(self.credit.on_finish(trajectory))  # delayed learning (if any)
         return result

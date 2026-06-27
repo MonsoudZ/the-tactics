@@ -4,6 +4,10 @@ Memory records every Outcome keyed by (tactic name, context signature) and serve
 back the running stats the Policy uses to decide. This is the substrate of
 "learns and gets better": nothing is hard-coded about which tactic is best — it
 emerges from results, and persists across runs when you use :class:`JsonStore`.
+
+Each signature also stores the raw ``features`` and ``goal`` it came from, so an
+:class:`~tactics.core.estimator.SimilarityEstimator` can generalize a tactic's
+track record across *similar* situations, not just identical ones.
 """
 
 from __future__ import annotations
@@ -11,8 +15,9 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 
 @dataclass
@@ -30,34 +35,72 @@ class TacticStats:
         return self.successes / self.trials if self.trials else 0.0
 
 
+@dataclass
+class Entry:
+    """One learning row, enriched with the situation it came from."""
+
+    signature: str
+    tactic: str
+    stats: TacticStats
+    features: dict[str, Any]
+    goal: str | None
+
+
 class MemoryStore(Protocol):
     """How the engine reads and writes experience. Swap the backend freely."""
 
-    def record(self, tactic_name: str, signature: str, *, reward: float, success: bool) -> None: ...
+    def record(
+        self,
+        tactic_name: str,
+        signature: str,
+        *,
+        reward: float,
+        success: bool,
+        features: dict[str, Any] | None = ...,
+        goal: str | None = ...,
+    ) -> None: ...
 
     def stats(self, tactic_name: str, signature: str) -> TacticStats: ...
 
     def total_trials(self, signature: str) -> int: ...
+
+    def entries(self) -> Iterator[Entry]: ...
 
 
 class InMemoryStore:
     """Non-persistent store. Great for tests and single-process runs."""
 
     def __init__(self) -> None:
-        # key: (signature, tactic_name) -> TacticStats
-        self._table: dict[tuple[str, str], TacticStats] = {}
+        self._table: dict[tuple[str, str], TacticStats] = {}  # (signature, tactic) -> stats
+        self._meta: dict[str, tuple[dict[str, Any], str | None]] = {}  # signature -> (features, goal)
 
-    def record(self, tactic_name: str, signature: str, *, reward: float, success: bool) -> None:
+    def record(
+        self,
+        tactic_name: str,
+        signature: str,
+        *,
+        reward: float,
+        success: bool,
+        features: dict[str, Any] | None = None,
+        goal: str | None = None,
+    ) -> None:
         st = self._table.setdefault((signature, tactic_name), TacticStats())
         st.trials += 1
         st.successes += 1 if success else 0
         st.total_reward += reward
+        if features is not None or goal is not None:
+            self._meta[signature] = (features or {}, goal)
 
     def stats(self, tactic_name: str, signature: str) -> TacticStats:
         return self._table.get((signature, tactic_name), TacticStats())
 
     def total_trials(self, signature: str) -> int:
         return sum(st.trials for (sig, _), st in self._table.items() if sig == signature)
+
+    def entries(self) -> Iterator[Entry]:
+        for (sig, name), st in self._table.items():
+            features, goal = self._meta.get(sig, ({}, None))
+            yield Entry(signature=sig, tactic=name, stats=st, features=features, goal=goal)
 
     def snapshot(self) -> dict[str, dict[str, dict]]:
         """Human-readable dump: {signature: {tactic_name: stats}}."""
@@ -81,11 +124,13 @@ class JsonStore(InMemoryStore):
         with open(self.path, encoding="utf-8") as fh:
             raw = json.load(fh)
         for entry in raw:
-            self._table[(entry["signature"], entry["tactic"])] = TacticStats(
+            sig, name = entry["signature"], entry["tactic"]
+            self._table[(sig, name)] = TacticStats(
                 trials=entry["trials"],
                 successes=entry["successes"],
                 total_reward=entry["total_reward"],
             )
+            self._meta[sig] = (entry.get("features") or {}, entry.get("goal"))
 
     def _flush(self) -> None:
         rows = [
@@ -95,6 +140,8 @@ class JsonStore(InMemoryStore):
                 "trials": st.trials,
                 "successes": st.successes,
                 "total_reward": st.total_reward,
+                "features": self._meta.get(sig, ({}, None))[0],
+                "goal": self._meta.get(sig, ({}, None))[1],
             }
             for (sig, name), st in self._table.items()
         ]
@@ -104,6 +151,6 @@ class JsonStore(InMemoryStore):
             json.dump(rows, fh, indent=2)
         os.replace(tmp, self.path)  # atomic write — never leaves a half file
 
-    def record(self, tactic_name: str, signature: str, *, reward: float, success: bool) -> None:
-        super().record(tactic_name, signature, reward=reward, success=success)
+    def record(self, tactic_name: str, signature: str, **kw: Any) -> None:
+        super().record(tactic_name, signature, **kw)
         self._flush()

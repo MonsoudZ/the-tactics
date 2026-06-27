@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tactics"
-version = "0.1.0"
+version = "0.2.0"
 description = "A goal-driven agent framework whose tactics learn from outcomes and snap together."
 readme = "README.md"
 requires-python = ">=3.10"

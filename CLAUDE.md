@@ -23,11 +23,38 @@ a new domain without editing the core, and it just starts competing on results.
 | `Target`  | `core/target.py`         | A domain we plug into. `observe()` returns state; you add domain methods tactics call. |
 | `Tactic`  | `core/tactic.py`         | One reusable strategy. `is_applicable()` + `execute() → Outcome`. |
 | `Outcome` | `core/outcome.py`        | The learning signal: `success` + `reward`. Bigger reward = better. |
-| `Policy`  | `core/policy.py`         | Chooses the next tactic (explore/exploit) from `Memory`. |
+| `Policy`  | `core/policy.py`         | Chooses the next tactic (explore/exploit) via an `Estimator`. |
 
 Supporting cast: `Context` (the per-step snapshot handed to tactics), `Memory`
 (records outcomes per tactic+situation; `InMemoryStore` or persistent `JsonStore`),
 `Agent`/`RunResult` (`core/engine.py`, runs the loop).
+
+### Learning upgrades (v0.2, both domain-free, both pluggable)
+
+| Concern | File | What it does | Strategies |
+|---------|------|--------------|------------|
+| **Generalization across situations** | `core/estimator.py` | How a tactic's value *here* is judged. The policy asks the `Estimator`, so generalization is a swap, not a rewrite. | `ExactEstimator` (default; identical situations only) · `SimilarityEstimator` (borrows from *similar* situations via a domain-free feature kernel) |
+| **Delayed credit assignment** | `core/credit.py` | Spreads a reward back over the moves that earned it. Controls *when* memory is written. | `ImmediateCredit` (default; online) · `DiscountedReturn(gamma)` (Monte-Carlo return across episodes) |
+
+Each `Agent.pursue` call is one episode. Use `DiscountedReturn` when reward is
+delayed (trading, multi-step fixes) and run many episodes; use a
+`SimilarityEstimator` when situations vary continuously and cold-start hurts.
+
+### The colony layer (v0.2) — `tactics.colony`, also domain-free
+
+Many ants over a shared board, coordinating by pheromones. Built on the core loop.
+
+| Concept | File | Job |
+|---------|------|-----|
+| `Blackboard` | `colony/blackboard.py` | Shared Tasks + Findings + **pheromones** (decay & reinforce). Thread-safe. |
+| `Planner` | `colony/planner.py` | Goal → Tasks; re-runs each round to post follow-ups from Findings. |
+| `Critic` | `colony/critic.py` | Verifies an Outcome before it's trusted. Learning integrity **and** the safety gate. |
+| `Colony` | `colony/colony.py` | Each round: plan → claim top tasks (pheromone-biased) → run ants **in parallel** → critic verifies → learn + reinforce → evaporate. |
+
+Important: the Critic gates **learning and task-completion**, not a side effect a
+tactic already performed. For irreversible/outward-facing actions (deploy, send,
+sell), write the tactic to *propose* and let the Critic (or a human-approval hook)
+gate the commit. Use `max_workers=1` for deterministic runs/tests.
 
 ## How to add a new domain (a "playbook")
 
@@ -64,13 +91,17 @@ Copy `examples/lead_finder_demo.py` as the canonical shape.
 
 ```bash
 python3 -m pip install -e .            # install (editable)
-python3 -m pytest                      # run tests (keep green)
-python3 examples/lead_finder_demo.py   # see the loop learn
+python3 -m pytest                      # run tests (keep green — 30 tests)
+python3 examples/lead_finder_demo.py   # see the single loop learn
+python3 examples/swarm_demo.py         # see the colony swarm, verify, reinforce
 ```
 
 ## Status
 
 - [x] Core loop, memory (in-memory + JSON), UCB + epsilon-greedy policies, tests.
+- [x] Generalization across situations (`SimilarityEstimator`).
+- [x] Delayed credit assignment (`DiscountedReturn`).
+- [x] Colony layer: blackboard + pheromones, planner, critic, parallel swarm.
 - [ ] Playbook: focumate (Rails + Swift) — harden, bug-hunt, contract-check.
 - [ ] Playbook: trading — alerts, shift/buy/sell against a goal.
 - [ ] Playbook: lead-finder — score bad sites, draft + send outreach.
