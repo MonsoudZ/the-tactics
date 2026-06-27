@@ -14,6 +14,7 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "ruff>=0.4"]
+llm = ["anthropic>=0.40"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

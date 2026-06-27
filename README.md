@@ -70,14 +70,29 @@ Autonomy you can actually turn loose — all domain-free, all off by default:
 - **Adaptive memory** (`RecencyStore`) — for worlds that change (markets, code),
   old experience decays so it tracks what works *now*.
 
+## The judgment brain (`tactics.llm`)
+
+For the work that needs a model, not a rule — "is this a *real* bug?", "is this
+email good?". Provider-agnostic and offline-testable:
+
+- **`LLMTactic`** — a tactic whose `execute()` asks Claude and returns a normal
+  `Outcome`, so it competes and learns like any other. Token usage becomes
+  `Outcome.cost`, so a `Budget` caps token spend.
+- **`LLMCritic`** — an adversarial verifier that **defaults to rejecting when
+  unsure** and fails closed on errors, so fake or shaky work never gets trusted.
+- **`ClaudeClient`** (model `claude-opus-4-8`) for production; **`ScriptedClient`**
+  for tests and demos — no API key, no network. Enable with
+  `pip install 'tactics[llm]'`.
+
 ## Quickstart
 
 ```bash
 python3 -m pip install -e .
-python3 -m pytest                      # 43 tests, all green
+python3 -m pytest                      # 56 tests, all green
 python3 examples/lead_finder_demo.py   # one ant learns the winning email
 python3 examples/swarm_demo.py         # a colony hardens a service in parallel
 python3 examples/safety_demo.py        # budgets, approval gate, audit journal
+python3 examples/llm_demo.py           # LLM tactics + LLM critic (offline, scripted)
 ```
 
 The lead demo gives three cold-email tactics hidden reply-rates the agent can't
@@ -127,6 +142,7 @@ src/tactics/core/        the domain-free engine (Goal, Target, Tactic, Outcome,
                          Policy, Estimator, CreditAssigner, Memory, Agent) plus the
                          trust layer (Budget, ApprovalGate, Journal, RecencyStore)
 src/tactics/colony/      the swarm layer (Blackboard, Planner, Critic, Colony)
+src/tactics/llm/         the judgment brain (LLMTactic, LLMCritic, ClaudeClient)
 src/tactics/playbooks/   one module per real use case (add yours here)
 examples/                runnable demos
 tests/                   pytest suite — keep it green
@@ -134,8 +150,9 @@ tests/                   pytest suite — keep it green
 
 ## Status
 
-Core engine + colony + trust layer are built, tested (43 tests), and proven to
-learn — generalization across situations, delayed credit, budgets, an approval
-gate, an audit journal, and recency-weighted memory. Domain playbooks (focumate,
-trading, lead-finder, gift-cards) are next — built one at a time, each slotting
-into the same loop. Progress tracked in `CLAUDE.md`.
+Core engine + colony + trust layer + LLM layer are built, tested (56 tests), and
+proven to learn — generalization across situations, delayed credit, budgets, an
+approval gate, an audit journal, recency-weighted memory, and Claude-backed
+tactics with an adversarial critic. Domain playbooks (focumate, trading,
+lead-finder, gift-cards) are next — built one at a time, each slotting into the
+same loop. Progress tracked in `CLAUDE.md`.

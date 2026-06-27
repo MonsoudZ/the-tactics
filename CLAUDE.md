@@ -74,6 +74,22 @@ defaults to `AutoApprove`, a Journal is always attached).
 consumed (drives the Budget); risk/reversibility = declared on the `Proposal` so
 the gate can decide. Don't conflate them.
 
+### The LLM layer (v0.4) — `tactics.llm`, the judgment brain
+
+For the work that needs a model, not a rule. Provider-agnostic and **offline-testable**.
+
+| Concept | File | Job |
+|---------|------|-----|
+| `LLMClient` | `llm/client.py` | The one interface (`complete()`). `ClaudeClient` (lazy-imports `anthropic`, model `claude-opus-4-8`) for production; `ScriptedClient` for tests/demos (no key, no network). |
+| `LLMTactic` | `llm/tactic.py` | A tactic whose `execute()` asks the model; returns a normal `Outcome` so it competes and learns like any other. Token usage → `Outcome.cost` (Budget caps token spend). |
+| `LLMCritic` | `llm/critic.py` | An adversarial verifier — **defaults to reject when unsure, fail-closed on errors**. Gates what the colony learns and commits. |
+
+Rules: never send `temperature`/`top_p` (Opus 4.x rejects them); request JSON via
+`output_config.format`; `ClaudeClient` lazy-imports so the core installs/tests
+without `anthropic` (`pip install 'tactics[llm]'` to enable). An unparseable LLM
+result is a loss, not a crash. Subclass `LLMTactic.build_prompt` /
+`LLMCritic.build_prompt` to feed the model real evidence.
+
 ## How to add a new domain (a "playbook")
 
 This is the path for focumate, trading, lead-finder, gift-cards. Always the same:
@@ -109,10 +125,12 @@ Copy `examples/lead_finder_demo.py` as the canonical shape.
 
 ```bash
 python3 -m pip install -e .            # install (editable)
-python3 -m pytest                      # run tests (keep green — 43 tests)
+python3 -m pip install -e '.[llm]'     # install with the Claude-backed LLM layer
+python3 -m pytest                      # run tests (keep green — 56 tests)
 python3 examples/lead_finder_demo.py   # see the single loop learn
 python3 examples/swarm_demo.py         # see the colony swarm, verify, reinforce
 python3 examples/safety_demo.py        # see budgets, the approval gate, the journal
+python3 examples/llm_demo.py           # LLM tactics + LLM critic (offline, scripted)
 ```
 
 ## Status
@@ -122,11 +140,11 @@ python3 examples/safety_demo.py        # see budgets, the approval gate, the jou
 - [x] Delayed credit assignment (`DiscountedReturn`).
 - [x] Colony layer: blackboard + pheromones, planner, critic, parallel swarm.
 - [x] Trust layer: failure isolation, budgets, approval gate, journal, recency memory.
+- [x] LLM layer: Claude-backed tactics + adversarial LLM critic (`tactics.llm`).
 - [ ] Playbook: focumate (Rails + Swift) — harden, bug-hunt, contract-check.
 - [ ] Playbook: trading — alerts, shift/buy/sell against a goal.
 - [ ] Playbook: lead-finder — score bad sites, draft + send outreach.
 - [ ] Playbook: gift-cards — production-readiness checks.
-- [ ] Optional: LLM-backed tactics (Claude API) for the judgment-heavy work.
 
 Build them one at a time. Each new playbook should leave this checklist and the
 contracts above true.
