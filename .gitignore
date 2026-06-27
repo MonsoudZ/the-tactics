@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tactics learning state (persisted memory)
+.tactics/
+*.tactics.json
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.coverage
