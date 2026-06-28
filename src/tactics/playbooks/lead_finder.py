@@ -46,6 +46,9 @@ class Site:
     business: str
     # Observed weakness signals, e.g. {"no_https": True, "mobile_broken": True}.
     signals: dict[str, bool] = field(default_factory=dict)
+    # Free-form context for richer drafting (rating, reviews, raw issue text,
+    # phone, place_id…). Populated by load_places_csv; empty for simple loaders.
+    meta: dict[str, Any] = field(default_factory=dict)
 
 
 # --- loading your lead source (a file your tool produces) ---------------------
@@ -243,10 +246,18 @@ def llm_drafter(client, *, max_tokens: int = 1024) -> Callable[[Site], Draft]:
     )
 
     def draft(site: Site) -> Draft:
-        issues = ", ".join(k.replace("_", " ") for k, v in site.signals.items() if v) or "unclear"
+        issues = site.meta.get("issues") or ", ".join(
+            k.replace("_", " ") for k, v in site.signals.items() if v
+        ) or "unclear"
+        context = ""
+        if site.meta.get("rating"):
+            context = (
+                f"\nReputation: {site.meta.get('rating')} stars, "
+                f"{site.meta.get('reviews')} reviews (lead with this — it's real and flattering)."
+            )
         prompt = (
             f"Write cold outreach to win {site.business} as a web-services client.\n"
-            f"Their site issues: {issues}\n\n"
+            f"Their site issues: {issues}{context}\n\n"
             'Return {"subject": "...", "body": "...", "quality": <0..1 self-rating>}.'
         )
         resp = client.complete(prompt, system=system, schema=schema, max_tokens=max_tokens)
@@ -259,6 +270,135 @@ def llm_drafter(client, *, max_tokens: int = 1024) -> Callable[[Site], Draft]:
         )
 
     return draft
+
+
+# --- adapter for the Ruby pipeline's leads.csv -------------------------------
+#
+# Your lead_finder.rb already finds, audits, scores, and ranks leads into a CSV
+# with columns: date_found, email_sent, confidence, score, name, phone, website,
+# rating, reviews, issues, address, place_id. This adapter reads that file so the
+# brain can do the part the Ruby tool doesn't: draft + verify + (gated) send.
+
+_ISSUE_SIGNALS = [
+    ("no website", "no_website"),
+    ("unreachable", "unreachable"),
+    ("no https", "no_https"),
+    ("viewport", "not_mobile"),
+    ("mobile", "not_mobile"),
+    ("title", "missing_title"),
+    ("meta description", "no_meta_description"),
+    ("slow", "slow"),
+    ("outdated", "outdated"),
+]
+
+
+def _parse_issues(text: str) -> dict[str, bool]:
+    """Turn the Ruby auditor's ``issues`` text into boolean signals."""
+    t = (text or "").lower()
+    return {name: True for needle, name in _ISSUE_SIGNALS if needle in t}
+
+
+def load_places_csv(path: str, *, only_unsent: bool = True, min_score: float = 0.0) -> list[Site]:
+    """Load leads from the Ruby pipeline's ``leads.csv``.
+
+    Keeps the rich context (rating, reviews, raw issues, phone, place_id) in
+    ``Site.meta`` so the drafter can write something specific. ``score`` is
+    normalized into ``meta["score_norm"]`` (0..1) for prioritization. By default
+    rows already marked ``email_sent`` are skipped, so you only work fresh leads.
+    """
+    with open(path, encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+
+    scores = [float(r.get("score") or 0) for r in rows]
+    max_score = max(scores) if scores else 0.0
+
+    sites: list[Site] = []
+    for r in rows:
+        if only_unsent and (r.get("email_sent") or "").strip():
+            continue
+        score = float(r.get("score") or 0)
+        if score < min_score:
+            continue
+
+        website = (r.get("website") or "").strip()
+        has_site = website not in ("", "(none)")
+        name = (r.get("name") or "").strip() or (_business_from_url(website) if has_site else "Unknown")
+        issues = (r.get("issues") or "").strip()
+        signals = _parse_issues(issues)
+        if not has_site:
+            signals["no_website"] = True
+
+        place_id = (r.get("place_id") or "").strip()
+        identity = website if has_site else f"noweb:{place_id or name}"
+        meta = {
+            "rating": r.get("rating"),
+            "reviews": r.get("reviews"),
+            "score": score,
+            "score_norm": round(score / max_score, 3) if max_score else 0.0,
+            "confidence": r.get("confidence"),
+            "phone": r.get("phone"),
+            "address": r.get("address"),
+            "place_id": place_id,
+            "website": website,
+            "issues": issues,
+        }
+        sites.append(Site(url=identity, business=name, signals=signals, meta=meta))
+    return sites
+
+
+def mark_emailed(path: str, place_ids, *, when: str) -> int:
+    """Stamp ``email_sent=<when>`` for these place_ids in leads.csv, closing the
+    loop with the Ruby tool (its next run preserves already-emailed leads).
+
+    Returns how many rows were updated. Only fills empty ``email_sent`` cells.
+    """
+    ids = set(place_ids)
+    with open(path, encoding="utf-8", newline="") as fh:
+        reader = csv.DictReader(fh)
+        fieldnames = reader.fieldnames or []
+        rows = list(reader)
+    updated = 0
+    for r in rows:
+        if r.get("place_id") in ids and not (r.get("email_sent") or "").strip():
+            r["email_sent"] = when
+            updated += 1
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return updated
+
+
+def places_scorer(site: Site) -> float:
+    """Trust the Ruby pipeline's ranking — reward higher-scored leads more."""
+    return float(site.meta.get("score_norm", 0.0))
+
+
+def places_drafter(site: Site) -> Draft:
+    """A specific, credible hook built from the lead's real reputation + issues."""
+    m = site.meta
+    rating, reviews = m.get("rating"), m.get("reviews")
+    cred = f"a {rating}★ reputation with {reviews} reviews" if rating else "a great reputation"
+    if site.signals.get("no_website"):
+        body = (
+            f"Hi {site.business} — you've earned {cred}, but I couldn't find a website. "
+            f"Customers who search for you are finding nothing (or your competitors). "
+            f"I build fast, mobile-first sites for local businesses — worth a quick chat?"
+        )
+        quality = 0.85
+    else:
+        first_issue = (m.get("issues") or "").split(";")[0].strip() or "a few fixable issues"
+        body = (
+            f"Hi {site.business} — impressive: {cred}. I took a look at your site and noticed "
+            f"{first_issue}, which quietly costs you customers who check you out online. "
+            f"I help local businesses fix exactly this — want a free 5-minute audit?"
+        )
+        quality = min(1.0, 0.55 + 0.1 * len(site.signals))
+    return Draft(
+        subject=f"quick note about {site.business}'s online presence",
+        body=body,
+        quality=round(quality, 3),
+    )
 
 
 # --- target ------------------------------------------------------------------
@@ -388,6 +528,33 @@ def build_colony(
         gate=gate or DryRun(),
         memory=memory or InMemoryStore(),
         critic=critic or quality_critic(),
+        budget=budget or Budget(max_attempts_per_task=1),
+        max_workers=max_workers,
+        max_rounds=max_rounds,
+    )
+
+
+def build_places_colony(
+    target: LeadFinder,
+    *,
+    gate: ApprovalGate | None = None,
+    memory: MemoryStore | None = None,
+    drafter: Callable[[Site], Draft] = places_drafter,
+    critic: FunctionCritic | None = None,
+    budget: Budget | None = None,
+    max_workers: int = 1,
+    max_rounds: int = 500,
+) -> Colony:
+    """Wire a colony for leads loaded from the Ruby pipeline's CSV: trust its
+    ranking (``places_scorer``), draft from the rich context, gate sends (DryRun
+    by default). Pass ``drafter=llm_drafter(client)`` for Claude-written hooks."""
+    return Colony(
+        target,
+        [WorkLead(scorer=places_scorer, drafter=drafter, min_weakness=0.1)],
+        FunctionPlanner(lead_planner),
+        gate=gate or DryRun(),
+        memory=memory or InMemoryStore(),
+        critic=critic or quality_critic(min_reward=0.15),
         budget=budget or Budget(max_attempts_per_task=1),
         max_workers=max_workers,
         max_rounds=max_rounds,

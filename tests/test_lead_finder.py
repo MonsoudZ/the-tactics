@@ -8,13 +8,37 @@ from tactics.playbooks.lead_finder import (
     LeadFinder,
     Site,
     build_colony,
+    build_places_colony,
     heuristic_scorer,
     llm_drafter,
     llm_scorer,
+    load_places_csv,
     load_sites,
+    mark_emailed,
+    places_drafter,
+    places_scorer,
     template_drafter,
     win_clients,
 )
+
+# A sample in the exact schema lead_finder.rb writes.
+_PLACES_HEADER = (
+    "date_found,email_sent,confidence,score,name,phone,website,rating,reviews,issues,address,place_id\n"
+)
+_PLACES_ROWS = (
+    '2026-06-01,,high,18.4,Ace Roofing,303-555-0100,http://aceroofing.example,4.8,210,'
+    '"no HTTPS; not mobile-responsive (no viewport); slow load (3.2s)",Parker CO,pid_ace\n'
+    "2026-06-01,,needs_verification,12.0,Best Dentistry,303-555-0200,(none),4.9,150,"
+    "no website at all,Denver CO,pid_best\n"
+    "2026-05-01,2026-05-02,high,9.0,Old Spa,205-555-0300,http://oldspa.example,4.4,40,"
+    "outdated (©2019),Mobile AL,pid_old\n"
+)
+
+
+def _write_places_csv(tmp_path):
+    p = tmp_path / "leads.csv"
+    p.write_text(_PLACES_HEADER + _PLACES_ROWS, encoding="utf-8")
+    return str(p)
 
 STRONG = Site("weak.example", "Weak Co", {"no_https": True, "mobile_broken": True, "slow": True})
 MEH = Site("ok.example", "OK Co", {"no_https": True, "mobile_broken": False, "slow": False})
@@ -154,6 +178,58 @@ def test_load_sites_json_with_field_overrides(tmp_path):
     assert sites[0].url == "http://z.example"
     assert sites[0].business == "Z Co"
     assert sites[0].signals == {"no_https": False, "mobile_broken": True}
+
+
+# --- Places pipeline adapter (the Ruby leads.csv) ----------------------------
+
+
+def test_load_places_csv_skips_emailed_and_parses_issues(tmp_path):
+    sites = load_places_csv(_write_places_csv(tmp_path))
+    assert len(sites) == 2  # the already-emailed "Old Spa" row is skipped
+    by_name = {s.business: s for s in sites}
+    assert by_name["Ace Roofing"].signals == {"no_https": True, "not_mobile": True, "slow": True}
+    assert by_name["Ace Roofing"].meta["rating"] == "4.8"
+
+
+def test_load_places_csv_handles_no_website_lead(tmp_path):
+    sites = load_places_csv(_write_places_csv(tmp_path))
+    best = next(s for s in sites if s.business == "Best Dentistry")
+    assert best.signals.get("no_website") is True
+    assert best.url == "noweb:pid_best"  # unique identity, no collision
+    assert best.meta["website"] == "(none)"
+
+
+def test_places_scorer_normalizes_ranking(tmp_path):
+    sites = load_places_csv(_write_places_csv(tmp_path))
+    ace = next(s for s in sites if s.business == "Ace Roofing")
+    assert places_scorer(ace) == 1.0  # top score in the set
+
+
+def test_places_drafter_is_specific(tmp_path):
+    sites = load_places_csv(_write_places_csv(tmp_path))
+    ace = next(s for s in sites if s.business == "Ace Roofing")
+    draft = places_drafter(ace)
+    assert "Ace Roofing" in draft.body
+    assert "210 reviews" in draft.body  # leads with the real reputation
+    best = next(s for s in sites if s.business == "Best Dentistry")
+    assert "website" in places_drafter(best).body.lower()
+
+
+def test_mark_emailed_closes_the_loop(tmp_path):
+    path = _write_places_csv(tmp_path)
+    n = mark_emailed(path, ["pid_ace"], when="2026-06-28")
+    assert n == 1
+    reloaded = load_places_csv(path)  # pid_ace now skipped as emailed
+    assert all(s.meta["place_id"] != "pid_ace" for s in reloaded)
+
+
+def test_places_colony_drafts_top_leads_dry_run(tmp_path):
+    target = LeadFinder(load_places_csv(_write_places_csv(tmp_path)))
+    result = build_places_colony(target).run(win_clients())
+    assert target.sent == {}  # DryRun
+    done = [f for f in result.findings if f.kind == "task_done"]
+    assert len(done) == 2  # both fresh leads drafted + verified
+    assert len(result.journal.of_kind("gate.hold")) == 2  # both proposed for review
 
 
 def test_colony_with_llm_seams_and_budget():
