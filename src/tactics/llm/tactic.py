@@ -12,7 +12,6 @@ findings into ``Outcome.metrics``).
 
 from __future__ import annotations
 
-from typing import Any
 
 from ..core.outcome import Outcome
 from ..core.tactic import Tactic

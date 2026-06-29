@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from tactics import Context, Goal, Outcome, Target
-from tactics.colony import Blackboard
 from tactics.llm import ClaudeClient, LLMCritic, LLMTactic, ScriptedClient, extract_json
 
 
