@@ -29,6 +29,7 @@ from .core.budget import Budget
 from .core.context import Context
 from .core.credit import CreditAssigner, DiscountedReturn, ImmediateCredit, Record, TrajectoryStep
 from .core.engine import Agent, RunResult, Step
+from .env import load_env
 from .core.estimator import (
     Estimate,
     Estimator,
@@ -74,6 +75,7 @@ __all__ = [
     "InMemoryStore",
     "Journal",
     "JsonStore",
+    "load_env",
     "MemoryStore",
     "Outcome",
     "Policy",

@@ -15,6 +15,7 @@ venv/
 # Secrets — never commit these (use env vars / a gitignored .env)
 .env
 .env.*
+!.env.example
 *.env
 secrets.*
 *_secret*
