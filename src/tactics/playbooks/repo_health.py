@@ -84,6 +84,15 @@ class CodeRepo(Target):
         except OSError:
             return ""
 
+    def append_gitignore(self, line: str) -> None:
+        path = os.path.join(self.path, ".gitignore")
+        existing = self.read(".gitignore")
+        if line in existing.split():
+            return
+        sep = "" if (not existing or existing.endswith("\n")) else "\n"
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"{sep}{line}\n")
+
 
 class _Check(Tactic):
     check = ""
@@ -275,6 +284,42 @@ class FixCommand(Tactic):
         ok = code == 0
         return Outcome(success=ok, reward=1.0 if ok else 0.0,
                        metrics={"exit": code}, notes="fixed" if ok else out.strip()[-300:])
+
+
+class UntrackFile(Tactic):
+    """Gated fix for a committed secret: stop tracking the file (git rm --cached)
+    and add it to .gitignore. Pairs with ForbiddenFileCheck — turns the most
+    dangerous finding ('secret committed') into 'fixed'. Generic to any git repo.
+
+    Note: this stops *future* tracking. A secret already in history must still be
+    rotated (the only thing that truly invalidates a leaked key) and, if needed,
+    scrubbed from history — the gate's journal makes the action auditable.
+    """
+
+    def __init__(self, path: str, *, name: str | None = None):
+        super().__init__(name=name or f"untrack:{path}")
+        self.path = path
+
+    def is_applicable(self, ctx) -> bool:  # noqa: ANN001
+        return self.path in ctx.target.tracked_files()
+
+    def execute(self, ctx) -> Outcome:  # noqa: ANN001
+        def commit():
+            code, out = ctx.target.run(["git", "rm", "--cached", "--", self.path])
+            ctx.target.append_gitignore(self.path)
+            return code, out
+
+        result = ctx.gate.submit(
+            Proposal(action=f"untrack `{self.path}` and add it to .gitignore",
+                     commit=commit, reversible=True, risk="medium"),
+            ctx,
+        )
+        if not result.committed:
+            return Outcome(success=False, reward=0.0, notes="untrack held for approval")
+        code, out = result.result
+        ok = code == 0
+        return Outcome(success=ok, reward=1.0 if ok else 0.0,
+                       notes=f"untracked {self.path}" if ok else out.strip()[-200:])
 
 
 def command_passes_goal(name: str, cmd: list[str]) -> Goal:
