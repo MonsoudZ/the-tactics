@@ -27,6 +27,7 @@ import xml.etree.ElementTree as ET
 from typing import Callable
 
 from ..colony import AcceptCritic, Colony, FunctionPlanner
+from ..core.approval import Proposal
 from ..core.goal import Goal
 from ..core.memory import InMemoryStore, MemoryStore
 from ..core.outcome import Outcome
@@ -234,6 +235,53 @@ class ForbiddenFileCheck(_Check):
         ok = not hits
         return Outcome(success=ok, reward=1.0 if ok else 0.0, metrics={"tracked": hits},
                        notes="none tracked" if ok else f"sensitive file(s) committed: {hits}")
+
+
+class FixCommand(Tactic):
+    """An *acting* tactic: propose a fix command through the gate, run it if
+    approved. This is what closes the loop — the brain doesn't just find the
+    problem, it fixes it. Reversible by default; the gate decides whether it fires
+    (DryRun = propose only; AutoApprove/Callback = actually run)."""
+
+    def __init__(
+        self,
+        name: str,
+        cmd: list[str],
+        *,
+        applies_when: Callable[[object], bool] | None = None,
+        risk: str = "low",
+    ):
+        super().__init__(name=name)
+        self.cmd = list(cmd)
+        self.applies_when = applies_when
+        self.risk = risk
+
+    def is_applicable(self, ctx) -> bool:  # noqa: ANN001
+        return True if self.applies_when is None else bool(self.applies_when(ctx))
+
+    def execute(self, ctx) -> Outcome:  # noqa: ANN001
+        result = ctx.gate.submit(
+            Proposal(
+                action=f"run `{' '.join(self.cmd)}`",
+                commit=lambda: ctx.target.run(self.cmd),
+                reversible=True,
+                risk=self.risk,
+            ),
+            ctx,
+        )
+        if not result.committed:
+            return Outcome(success=False, reward=0.0, notes="fix held for approval (dry-run)")
+        code, out = result.result
+        ok = code == 0
+        return Outcome(success=ok, reward=1.0 if ok else 0.0,
+                       metrics={"exit": code}, notes="fixed" if ok else out.strip()[-300:])
+
+
+def command_passes_goal(name: str, cmd: list[str]) -> Goal:
+    """A goal whose 'done' test is: this command exits 0 (e.g. lint clean,
+    tests green). The brain works until the command passes."""
+    return Goal(name=name, description=f"`{' '.join(cmd)}` passes",
+                is_satisfied=lambda ctx: ctx.target.run(cmd)[0] == 0)
 
 
 def audit_goal() -> Goal:
