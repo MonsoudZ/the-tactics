@@ -197,6 +197,45 @@ class ScanSecrets(_Check):
         )
 
 
+class CommandCheck(_Check):
+    """Generic check: run a command, pass = exit 0. Flags a missing tool rather
+    than passing it. The reusable building block for Rails/Swift/etc. checks."""
+
+    def __init__(self, check: str, cmd: list[str], *, name: str | None = None):
+        super().__init__(name=name or f"run_{check}")
+        self.check = check
+        self.cmd = list(cmd)
+
+    def execute(self, ctx) -> Outcome:  # noqa: ANN001
+        code, out = ctx.target.run(self.cmd)
+        if code == 127:
+            return Outcome(success=False, reward=0.5,
+                           metrics={"skipped": True, "tool": self.cmd[0]},
+                           notes=f"{self.cmd[0]} not installed (skipped)")
+        ok = code == 0
+        return Outcome(success=ok, reward=1.0 if ok else 0.0, metrics={"exit": code},
+                       notes="passed" if ok else (out.strip()[-400:] or f"exit {code}"))
+
+
+class ForbiddenFileCheck(_Check):
+    """Fail if a sensitive file is tracked in git (e.g. Rails config/master.key,
+    a committed .env). Catches the 'secret committed' class before it ships."""
+
+    def __init__(self, check: str, patterns: list[str], *, name: str | None = None):
+        super().__init__(name=name or f"check_{check}")
+        self.check = check
+        self.patterns = list(patterns)
+
+    def execute(self, ctx) -> Outcome:  # noqa: ANN001
+        import fnmatch
+
+        tracked = ctx.target.tracked_files()
+        hits = sorted({f for f in tracked for p in self.patterns if fnmatch.fnmatch(f, p)})
+        ok = not hits
+        return Outcome(success=ok, reward=1.0 if ok else 0.0, metrics={"tracked": hits},
+                       notes="none tracked" if ok else f"sensitive file(s) committed: {hits}")
+
+
 def audit_goal() -> Goal:
     return Goal(name="repo_health", description="Audit the repository for health and safety")
 
@@ -207,10 +246,13 @@ def build_audit_colony(
     tactics: list[Tactic] | None = None,
     memory: MemoryStore | None = None,
     max_workers: int = 4,
-    max_rounds: int = 3,
+    max_rounds: int | None = None,
 ) -> Colony:
     tactics = tactics or [RunTests(), RunLint(), ScanSecrets()]
     checks = [t.check for t in tactics]  # type: ignore[attr-defined]
+    # Enough rounds to run every check even at max_workers=1 (checks are one-shot).
+    if max_rounds is None:
+        max_rounds = len(tactics) + 2
 
     def plan(goal, board, target):  # noqa: ANN001
         if board.tasks:

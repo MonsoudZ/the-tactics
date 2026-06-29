@@ -155,7 +155,12 @@ python3 examples/llm_demo.py           # LLM tactics + LLM critic (offline, scri
 - [x] Colony layer: blackboard + pheromones, planner, critic, parallel swarm.
 - [x] Trust layer: failure isolation, budgets, approval gate, journal, recency memory.
 - [x] LLM layer: Claude-backed tactics + adversarial LLM critic (`tactics.llm`).
-- [ ] Playbook: focumate (Rails + Swift) — harden, bug-hunt, contract-check.
+- [~] Playbook: focumate (Rails + Swift) — prod-readiness audits built
+      (`playbooks/focumate.py`: tests, RuboCop, Brakeman, bundler-audit, migrations,
+      secret scan, committed-key check; Swift build/test/lint). Run against the repo
+      when it's in session scope. Next: gated fix tactics + front/back contract check.
+- [x] Playbook: repo-health — audit any repo (tests/lint/secrets) via shell-out
+      (`playbooks/repo_health.py`); the reusable base the focumate audits build on.
 - [ ] Playbook: trading — alerts, shift/buy/sell against a goal.
 - [x] Playbook: lead-finder — score bad sites, draft + send outreach (`playbooks/lead_finder.py`, dry-run by default).
 - [ ] Playbook: gift-cards — production-readiness checks.
