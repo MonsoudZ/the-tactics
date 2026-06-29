@@ -135,6 +135,33 @@ print(agent.pursue(goal).summary())
 See **`CLAUDE.md`** for the architecture rules and the step-by-step recipe for
 adding a domain. See `src/tactics/core/` for the (heavily commented) contracts.
 
+## Use the brain in your other projects
+
+`tactics` is a normal pip-installable package, so any project can depend on it:
+
+```bash
+# from GitHub (pin a branch or tag)
+python3 -m pip install "git+https://github.com/MonsoudZ/the-tactics.git@main"
+python3 -m pip install "tactics[llm] @ git+https://github.com/MonsoudZ/the-tactics.git@main"  # with Claude
+```
+
+Two ways to organize playbooks:
+
+- **Central** — keep every playbook in this repo under `src/tactics/playbooks/`
+  and run them pointed at your other projects. One toolbox, one place to learn.
+- **Per-project** — each repo installs `tactics` and writes its own `Target` +
+  tactics locally. The core stays domain-free; each repo brings its domain.
+
+The brain is **Python**, but it can drive a project in *any* language: your
+`Target` reaches the domain however it needs to — shell out (`subprocess` to run
+Rails tests or a Ruby script), call an HTTP API, read/write files. The Ruby
+lead-finder is exactly this: a Ruby tool produces `leads.csv`, and the Python
+brain (`playbooks/lead_finder.py`) picks it up downstream.
+
+**Secrets:** never hardcode keys. Read them from the environment
+(`os.environ["ANTHROPIC_API_KEY"]`) and keep a gitignored `.env` (this repo's
+`.gitignore` already excludes `.env`, `*.key`, `leads.csv`, etc.).
+
 ## Layout
 
 ```

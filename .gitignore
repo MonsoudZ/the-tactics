@@ -12,6 +12,21 @@ venv/
 .tactics/
 *.tactics.json
 
+# Secrets — never commit these (use env vars / a gitignored .env)
+.env
+.env.*
+*.env
+secrets.*
+*_secret*
+*.pem
+*.key
+credentials.json
+service-account*.json
+
+# Lead/outreach data (may contain business PII)
+leads.csv
+*.leads.csv
+
 # Tooling
 .pytest_cache/
 .ruff_cache/
