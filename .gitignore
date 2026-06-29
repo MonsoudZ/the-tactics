@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tactics learning state (persisted memory)
+.tactics/
+*.tactics.json
+
+# Secrets — never commit these (use env vars / a gitignored .env)
+.env
+.env.*
+!.env.example
+*.env
+secrets.*
+*_secret*
+*.pem
+*.key
+credentials.json
+service-account*.json
+
+# Lead/outreach data (may contain business PII)
+leads.csv
+*.leads.csv
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.coverage
