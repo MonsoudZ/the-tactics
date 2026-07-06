@@ -13,6 +13,7 @@ findings into ``Outcome.metrics``).
 from __future__ import annotations
 
 
+from ..core.lessons import LessonStore, render_lessons
 from ..core.outcome import Outcome
 from ..core.tactic import Tactic
 from .client import LLMClient, extract_json
@@ -48,6 +49,8 @@ class LLMTactic(Tactic):
         system: str | None = None,
         max_tokens: int = 2048,
         cost_per_call: float | None = None,
+        lessons: LessonStore | None = None,
+        lesson_limit: int = 6,
     ) -> None:
         super().__init__(name=name)
         self.client = client
@@ -55,6 +58,9 @@ class LLMTactic(Tactic):
         self.max_tokens = max_tokens
         # If set, every call costs this (e.g. dollars). Else cost = tokens used.
         self.cost_per_call = cost_per_call
+        # Verbal memory: relevant past lessons are prepended to every prompt.
+        self.lessons = lessons
+        self.lesson_limit = lesson_limit
 
     def build_prompt(self, ctx) -> str:  # noqa: ANN001
         raise NotImplementedError("LLMTactic subclasses must implement build_prompt()")
@@ -71,8 +77,22 @@ class LLMTactic(Tactic):
             notes=str(data.get("notes", "")),
         )
 
+    def _with_lessons(self, prompt: str, ctx) -> str:  # noqa: ANN001
+        """Prepend relevant past lessons — the verbal memory — to the prompt."""
+        if self.lessons is None:
+            return prompt
+        block = render_lessons(
+            self.lessons.relevant(
+                playbook=getattr(ctx.target, "name", None),
+                goal=getattr(ctx.goal, "name", None) if ctx.goal else None,
+                query=prompt,
+                limit=self.lesson_limit,
+            )
+        )
+        return f"{block}\n\n{prompt}" if block else prompt
+
     def execute(self, ctx) -> Outcome:  # noqa: ANN001
-        prompt = self.build_prompt(ctx)
+        prompt = self._with_lessons(self.build_prompt(ctx), ctx)
         resp = self.client.complete(
             prompt, system=self.system, schema=self.SCHEMA, max_tokens=self.max_tokens
         )

@@ -39,6 +39,13 @@ from .core.estimator import (
 )
 from .core.goal import Goal
 from .core.journal import Event, Journal
+from .core.lessons import (
+    InMemoryLessons,
+    JsonlLessons,
+    Lesson,
+    LessonStore,
+    render_lessons,
+)
 from .core.memory import (
     Entry,
     InMemoryStore,
@@ -73,9 +80,14 @@ __all__ = [
     "Goal",
     "ImmediateCredit",
     "InMemoryStore",
+    "InMemoryLessons",
     "Journal",
+    "JsonlLessons",
+    "Lesson",
+    "LessonStore",
     "JsonStore",
     "load_env",
+    "render_lessons",
     "MemoryStore",
     "Outcome",
     "Policy",

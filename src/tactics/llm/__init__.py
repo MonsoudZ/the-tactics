@@ -20,6 +20,7 @@ Cost flows through naturally: each call reports tokens as `Outcome.cost`, so a
 
 from .client import ClaudeClient, LLMClient, LLMResponse, ScriptedClient, extract_json
 from .critic import LLMCritic
+from .scribe import Scribe
 from .tactic import LLMTactic
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "LLMResponse",
     "LLMCritic",
     "LLMTactic",
+    "Scribe",
     "ScriptedClient",
     "extract_json",
 ]

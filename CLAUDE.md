@@ -90,6 +90,23 @@ without `anthropic` (`pip install 'tactics[llm]'` to enable). An unparseable LLM
 result is a loss, not a crash. Subclass `LLMTactic.build_prompt` /
 `LLMCritic.build_prompt` to feed the model real evidence.
 
+### Verbal memory (v0.5) — lessons + the Scribe
+
+`Memory` remembers numbers (which tactic earned what). **Lessons** remember words
+(what was learned and why). Together they make learning compound across runs.
+
+| Concept | File | Job |
+|---------|------|-----|
+| `Lesson` / `LessonStore` | `core/lessons.py` | One distilled insight + provenance (playbook, goal, tags, evidence). `InMemoryLessons` for tests; `JsonlLessons` for persistence (append-only JSONL — O(1) writes, greppable, hand-editable: delete a line to retract a lesson). |
+| `Scribe` | `llm/scribe.py` | After a run, distills the journal + findings into at most a few strict, evidence-backed lessons. Fail-silent: an unparseable distillation writes *nothing* (a bad lesson pollutes every future prompt). |
+| `LLMTactic(lessons=...)` | `llm/tactic.py` | Pass a `LessonStore` and relevant past lessons are prepended to every prompt — tactics start informed instead of cold. Lessons scoped to a *different* playbook are excluded; general (`playbook=None`) lessons apply everywhere. |
+
+The loop: run finishes → `Scribe(client, store).distill(result, playbook=...)` →
+future `LLMTactic`s wired to the same store recall what past runs learned.
+Rules: the scribe records only specific, actionable, evidence-backed insights —
+an empty list is a valid answer. Relevance is playbook/goal match + keyword
+overlap + recency; keep lesson text short and concrete so matching works.
+
 ## How to add a new domain (a "playbook")
 
 This is the path for focumate, trading, lead-finder, gift-cards. Always the same:
@@ -126,7 +143,7 @@ Copy `examples/lead_finder_demo.py` as the canonical shape.
 ```bash
 python3 -m pip install -e .            # install (editable)
 python3 -m pip install -e '.[llm]'     # install with the Claude-backed LLM layer
-python3 -m pytest                      # run tests (keep green — 56 tests)
+python3 -m pytest                      # run tests (keep green)
 python3 examples/lead_finder_demo.py   # see the single loop learn
 python3 examples/swarm_demo.py         # see the colony swarm, verify, reinforce
 python3 examples/safety_demo.py        # see budgets, the approval gate, the journal
@@ -155,6 +172,8 @@ python3 examples/llm_demo.py           # LLM tactics + LLM critic (offline, scri
 - [x] Colony layer: blackboard + pheromones, planner, critic, parallel swarm.
 - [x] Trust layer: failure isolation, budgets, approval gate, journal, recency memory.
 - [x] LLM layer: Claude-backed tactics + adversarial LLM critic (`tactics.llm`).
+- [x] Verbal memory: `LessonStore` (JSONL-persistent) + `Scribe` distillation +
+      lesson injection into `LLMTactic` prompts (`core/lessons.py`, `llm/scribe.py`).
 - [~] Playbook: focumate (Rails + Swift) — prod-readiness audits built
       (`playbooks/focumate.py`: tests, RuboCop, Brakeman, bundler-audit, migrations,
       secret scan, committed-key check; Swift build/test/lint). Run against the repo
