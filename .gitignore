@@ -9,8 +9,12 @@ dist/
 venv/
 
 # Tactics learning state (persisted memory)
-.tactics/
+# Ignore the contents (not the dir itself) so the negation below can apply —
+# git won't re-include a file whose parent directory is excluded outright.
+.tactics/*
 *.tactics.json
+# ...but curated verbal memory is knowledge, not state — keep it committed.
+!.tactics/lessons.jsonl
 
 # Secrets — never commit these (use env vars / a gitignored .env)
 .env
