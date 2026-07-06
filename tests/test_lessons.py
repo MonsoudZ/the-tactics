@@ -14,7 +14,6 @@ from tactics import (
     Journal,
     JsonlLessons,
     Lesson,
-    Outcome,
     Target,
     render_lessons,
 )
