@@ -778,3 +778,175 @@ def test_a_real_failure_is_still_learned_from():
     ctx = _ctx(_workspace(agent))
     tried = Outcome(success=False, reward=0.0, metrics={"denied": 0, "changed_files": 2})
     assert verification_critic().verify(tried, ctx).accepted is True
+
+
+# --- compounding: JsonStore + Scribe -----------------------------------------
+#
+# The claim this section has to earn: a second run starts better off than the
+# first, from disk, with no help from a live process.
+
+import json as _json
+
+from tactics import InMemoryLessons, InMemoryStore, JsonStore, Lesson
+from tactics.llm import ScriptedClient
+from tactics.playbooks.agent_sdk import (
+    BriefScribe,
+    brief_lessons,
+    brief_memory,
+    run_and_learn,
+)
+
+
+def test_a_brief_carries_no_lessons_when_no_store_is_wired():
+    agent = ScriptedAgent()
+    SingleAgentNarrow().execute(_ctx(_workspace(agent), description="fix the parser"))
+    assert agent.briefs[0] == "fix the parser"  # unchanged
+
+
+def test_past_lessons_are_prepended_to_the_brief():
+    store = InMemoryLessons()
+    store.add(Lesson(text="rspec is slow here; scope it to the changed file", playbook="agent_sdk"))
+    agent = ScriptedAgent()
+    SingleAgentNarrow(lessons=store).execute(_ctx(_workspace(agent), description="fix the parser"))
+    assert "rspec is slow here" in agent.briefs[0]
+    assert agent.briefs[0].endswith("fix the parser")  # the task still comes last
+
+
+def test_a_lesson_from_another_playbook_does_not_leak_in():
+    store = InMemoryLessons()
+    store.add(Lesson(text="never place a market order at the open", playbook="trading"))
+    store.add(Lesson(text="this repo's test suite needs PYTHONPATH", playbook="agent_sdk"))
+    agent = ScriptedAgent()
+    SingleAgentNarrow(lessons=store).execute(_ctx(_workspace(agent)))
+    assert "market order" not in agent.briefs[0]
+    assert "PYTHONPATH" in agent.briefs[0]
+
+
+def test_the_system_prompt_is_never_varied_by_lessons():
+    # The system prompt IS the brief shape being measured; quietly changing it
+    # would make two runs of the same tactic incomparable.
+    store = InMemoryLessons()
+    store.add(Lesson(text="a lesson", playbook="agent_sdk"))
+    agent = ScriptedAgent()
+    tactic = SingleAgentNarrow(lessons=store)
+    tactic.execute(_ctx(_workspace(agent)))
+    assert agent.specs[0].system_prompt == SingleAgentNarrow.spec.system_prompt
+
+
+def test_persist_puts_both_halves_of_memory_in_the_repo(tmp_path):
+    ws = AgentWorkspace(_git_repo(tmp_path), runner=_writing_runner())
+    colony = build_delivery_colony(ws, persist=True, gate=AutoApprove(), max_rounds=1)
+    assert isinstance(colony.memory, JsonStore)
+    assert colony.memory.path.endswith(".tactics/agent_sdk_memory.json")
+    # and every brief was handed the lesson store
+    assert all(t.lessons is not None for t in colony.tactics)
+
+
+def test_what_a_brief_earns_survives_the_process(tmp_path):
+    repo = _git_repo(tmp_path)
+
+    first = brief_memory(repo)
+    first.record("PlanThenPatch", '{"goal":"delivery"}', reward=1.0, success=True)
+    first.record("PlanThenPatch", '{"goal":"delivery"}', reward=1.0, success=True)
+    first.record("WriteTestFirst", '{"goal":"delivery"}', reward=0.0, success=False)
+
+    reloaded = brief_memory(repo)  # a fresh process would do exactly this
+    assert reloaded.stats("PlanThenPatch", '{"goal":"delivery"}').trials == 2
+    assert reloaded.stats("PlanThenPatch", '{"goal":"delivery"}').mean_reward == 1.0
+    assert reloaded.stats("WriteTestFirst", '{"goal":"delivery"}').mean_reward == 0.0
+
+
+def test_the_scribe_sees_which_brief_is_winning():
+    memory = InMemoryStore()
+    memory.record("PlanThenPatch", "sig", reward=1.0, success=True, features={"dirty": False})
+    memory.record("ReviewedSwarm", "sig", reward=0.0, success=False, features={"dirty": False})
+    board = BriefScribe(ScriptedClient(["{}"]), InMemoryLessons(), memory=memory).scoreboard()
+    assert "PlanThenPatch: 1 run(s), mean reward 1.00" in board
+    assert "ReviewedSwarm" in board
+    assert board.index("PlanThenPatch") < board.index("ReviewedSwarm")  # winner first
+
+
+def test_run_and_learn_writes_lessons_a_later_run_reads_back(tmp_path):
+    """The whole point, end to end and offline: run 1 teaches run 2."""
+    repo = _git_repo(tmp_path)
+    lesson_text = "the check must set PYTHONPATH or it measures the wrong tree"
+    client = ScriptedClient([_json.dumps({"lessons": [{"text": lesson_text, "evidence": "round 1"}]})])
+
+    ws = AgentWorkspace(repo, check=["test", "-f", "ant.txt"], runner=_writing_runner())
+    colony = build_delivery_colony(ws, persist=True, gate=AutoApprove(), max_rounds=1)
+    _result, written = run_and_learn(colony, delivery_goal("do the thing"), client=client)
+    assert [lesson.text for lesson in written] == [lesson_text]
+
+    # A second process: nothing in memory, everything from disk.
+    agent = ScriptedAgent()
+    ws2 = AgentWorkspace(repo, check=["true"], runner=agent.runner, shell=agent.shell)
+    colony2 = build_delivery_colony(ws2, persist=repo, gate=AutoApprove(), max_rounds=1)
+    tactic = colony2.tactics[0]
+    tactic.execute(_ctx(ws2, description="do the next thing"))
+    assert lesson_text in agent.briefs[0]
+
+
+def test_run_and_learn_without_a_client_still_runs_and_still_persists(tmp_path):
+    repo = _git_repo(tmp_path)
+    ws = AgentWorkspace(repo, check=["test", "-f", "ant.txt"], runner=_writing_runner())
+    colony = build_delivery_colony(ws, persist=True, gate=AutoApprove(), max_rounds=1)
+    result, written = run_and_learn(colony, delivery_goal("do the thing"))
+    assert written == []
+    assert result.history[0].accepted == 1  # an ant really ran and was learned from
+
+    on_disk = _json.loads(pathlib.Path(repo, ".tactics", "agent_sdk_memory.json").read_text())
+    assert [row["tactic"] for row in on_disk if row["trials"]]  # a brief's record, persisted
+
+
+def test_a_failed_distillation_writes_nothing(tmp_path):
+    # One fabricated lesson pollutes every future brief that recalls it.
+    repo = _git_repo(tmp_path)
+    ws = AgentWorkspace(repo, check=["true"], runner=_writing_runner())
+    colony = build_delivery_colony(ws, persist=True, gate=AutoApprove(), max_rounds=1)
+    _result, written = run_and_learn(colony, delivery_goal("x"), client=ScriptedClient(["not json"]))
+    assert written == []
+    assert list(brief_lessons(repo).entries()) == []
+
+
+def test_a_fresh_process_exploits_what_earlier_runs_proved(tmp_path):
+    """The load-bearing claim: yesterday's results change today's choice.
+
+    Note what this does *not* assert on a partly-explored store — UCB tries an
+    untried brief before exploiting a proven one, which is correct and is why
+    "it picked the winner" is only meaningful once every brief has a record.
+    """
+    repo = _git_repo(tmp_path)
+    ws = AgentWorkspace(repo, check=["true"], shell=lambda cmd: (0, ""))
+    ctx = _ctx(ws)
+    ctx.features = ws.features({})
+    signature = ctx.signature()
+
+    seed = brief_memory(repo)
+    scores = {"PlanThenPatch": 1.0, "SingleAgentNarrow": 0.0, "WriteTestFirst": 0.2,
+              "ReviewedSwarm": 0.1}
+    for _ in range(8):
+        for name, reward in scores.items():
+            seed.record(name, signature, reward=reward, success=reward > 0.5,
+                        features=ctx.features, goal="delivery")
+
+    # A new colony that has only what is on disk — no shared object, no warm cache.
+    colony = build_delivery_colony(ws, persist=repo, gate=AutoApprove())
+    picks = {colony.policy.choose(colony.tactics, ctx, colony.memory).name for _ in range(8)}
+    assert picks == {"PlanThenPatch"}
+
+
+def test_an_untried_brief_is_explored_before_a_proven_one_is_exploited(tmp_path):
+    # Guards the reading of the test above: with a brief still unmeasured, the
+    # policy should try it rather than settle early on a small sample.
+    repo = _git_repo(tmp_path)
+    ws = AgentWorkspace(repo, check=["true"], shell=lambda cmd: (0, ""))
+    ctx = _ctx(ws)
+    ctx.features = ws.features({})
+
+    seed = brief_memory(repo)
+    for _ in range(5):
+        seed.record("PlanThenPatch", ctx.signature(), reward=1.0, success=True,
+                    features=ctx.features, goal="delivery")
+
+    colony = build_delivery_colony(ws, persist=repo, gate=AutoApprove())
+    assert colony.policy.choose(colony.tactics, ctx, colony.memory).name != "PlanThenPatch"

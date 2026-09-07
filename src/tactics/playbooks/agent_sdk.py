@@ -59,10 +59,20 @@ from typing import Any, Callable
 from ..colony import Colony, FunctionCritic, FunctionPlanner, Verdict
 from ..core.approval import Proposal
 from ..core.goal import Goal
-from ..core.memory import InMemoryStore, MemoryStore
+from ..core.lessons import JsonlLessons, LessonStore, render_lessons
+from ..core.memory import InMemoryStore, JsonStore, MemoryStore
 from ..core.outcome import Outcome
 from ..core.tactic import Tactic
 from ..core.target import Target
+from ..llm.scribe import Scribe
+
+# Where a repo's accumulated experience lives. Numeric memory (which brief wins
+# where) and verbal memory (what past runs learned) sit side by side, inside the
+# repo they describe — so cloning the repo carries its experience with it, and a
+# brief's record from a Rails app never leaks into a Swift one.
+STORE_DIR = ".tactics"
+MEMORY_FILE = "agent_sdk_memory.json"
+LESSONS_FILE = "agent_sdk_lessons.jsonl"
 
 # Tools that only read. They never reach the gate — gating them would flood the
 # journal with noise and teach reviewers to skim it, which is how a real approval
@@ -590,8 +600,43 @@ class BriefTactic(Tactic):
 
     spec: BriefSpec = BriefSpec()
 
+    def __init__(
+        self,
+        *,
+        name: str | None = None,
+        lessons: LessonStore | None = None,
+        lesson_limit: int = 6,
+    ) -> None:
+        super().__init__(name=name)
+        # Verbal memory: what past runs learned, prepended to every brief. This is
+        # the half a fresh agent process cannot have — its context starts empty
+        # every time, however good the harness is.
+        self.lessons = lessons
+        self.lesson_limit = lesson_limit
+
     def build_brief(self, ctx: Any) -> str:
+        """The task itself. Override to shape *how* it is asked."""
         return str(ctx.task.description if ctx.task is not None else ctx.goal.description)
+
+    def _with_lessons(self, brief: str, ctx: Any) -> str:
+        """Prepend relevant past lessons — the same seam as ``LLMTactic``.
+
+        Lessons go in the brief, not the system prompt: the system prompt *is*
+        the brief shape being measured, and quietly varying it would make two
+        runs of the same tactic incomparable.
+        """
+        if self.lessons is None:
+            return brief
+        block = render_lessons(
+            self.lessons.relevant(
+                playbook=getattr(ctx.target, "name", None),
+                goal=getattr(ctx.goal, "name", None) if ctx.goal else None,
+                query=brief,
+                limit=self.lesson_limit,
+            ),
+            header="What past runs on this repository learned:",
+        )
+        return f"{block}\n\n{brief}" if block else brief
 
     def execute(self, ctx: Any) -> Outcome:
         broken = _roster_error(self.spec)
@@ -600,7 +645,8 @@ class BriefTactic(Tactic):
         bridge = GateBridge(ctx, self.spec.allowed_tools)
         before_snapshot = ctx.target.snapshot()
         before_files = set(ctx.target.changed_files())
-        run = ctx.target.run_agent(self.build_brief(ctx), self.spec, bridge)
+        brief = self._with_lessons(self.build_brief(ctx), ctx)
+        run = ctx.target.run_agent(brief, self.spec, bridge)
         cost = run.cost_usd
         metrics = {
             "tools": len(run.tools_used),
@@ -771,11 +817,90 @@ def verification_critic() -> FunctionCritic:
     return FunctionCritic(verify)
 
 
+def brief_memory(repo: str, *, subdir: str = STORE_DIR) -> JsonStore:
+    """Numeric memory that survives the process: which brief wins, and where.
+
+    Without this every run starts cold and the policy re-learns from scratch —
+    which is exactly the gap a static roster of prompts has, and the reason to
+    have a policy at all.
+    """
+    return JsonStore(os.path.join(repo, subdir, MEMORY_FILE))
+
+
+def brief_lessons(repo: str, *, subdir: str = STORE_DIR) -> JsonlLessons:
+    """Verbal memory: append-only JSONL, greppable, and editable by hand —
+    delete a line to retract a lesson that turned out to be wrong."""
+    return JsonlLessons(os.path.join(repo, subdir, LESSONS_FILE))
+
+
+class BriefScribe(Scribe):
+    """A scribe that sees the brief scoreboard, not just the journal.
+
+    The generic Scribe reads the journal and findings, which for this playbook
+    describe *what happened* but not *which brief it happened to*. The durable
+    lesson is almost always comparative — "PlanThenPatch wins on unfamiliar code
+    and wastes turns on one-liners" — so the standings go in the evidence.
+    """
+
+    def __init__(self, client, store, *, memory: MemoryStore | None = None, **kw) -> None:  # noqa: ANN001
+        super().__init__(client, store, **kw)
+        self.memory = memory
+
+    def scoreboard(self) -> str:
+        if self.memory is None:
+            return "(no recorded standings)"
+        rows = sorted(
+            self.memory.entries(),
+            key=lambda e: (e.stats.mean_reward, e.stats.trials),
+            reverse=True,
+        )
+        if not rows:
+            return "(no recorded standings)"
+        return "\n".join(
+            f"- {e.tactic}: {e.stats.trials} run(s), mean reward "
+            f"{e.stats.mean_reward:.2f}, situation {e.features}"
+            for e in rows[:12]
+        )
+
+    def build_prompt(self, result, playbook: str | None) -> str:  # noqa: ANN001
+        return (
+            f"{super().build_prompt(result, playbook)}\n\n"
+            f"Brief standings so far (numeric memory):\n{self.scoreboard()}\n\n"
+            "Prefer lessons that would change which brief a future run picks, or how "
+            "a brief is written. A lesson that merely restates a result is not durable."
+        )
+
+
+def run_and_learn(colony: Colony, goal: Goal, *, client: Any = None, lessons: LessonStore | None = None):
+    """Run the colony, then write down what it learned. The compounding loop.
+
+    Numeric memory records itself as the colony runs; the *words* — why a brief
+    won, what the gate kept stopping, which repo quirk cost three rounds —
+    evaporate with the journal unless something distills them. That is this.
+
+    Without a ``client`` the run still happens and numeric memory still persists;
+    only the verbal half is skipped. A failed distillation writes nothing at all,
+    because one fabricated lesson pollutes every future brief that recalls it.
+    """
+    result = colony.run(goal)
+    store = lessons or next(
+        (t.lessons for t in colony.tactics if getattr(t, "lessons", None) is not None), None
+    )
+    if client is None or store is None:
+        return result, []
+    written = BriefScribe(client, store, memory=colony.memory).distill(
+        result, playbook=getattr(colony.target, "name", None)
+    )
+    return result, written
+
+
 def build_delivery_colony(
     target: AgentWorkspace,
     *,
     tactics: list[Tactic] | None = None,
     memory: MemoryStore | None = None,
+    lessons: LessonStore | None = None,
+    persist: bool | str = False,
     gate: Any = None,
     budget: Any = None,
     max_rounds: int = 4,
@@ -790,15 +915,28 @@ def build_delivery_colony(
     crash. With isolation each ant gets its own git worktree, the main repo is
     never written to, and the work comes back as ``target.patches``.
 
-    Persist ``memory`` (a ``JsonStore``) to keep what the briefs earn across runs
-    — an in-memory store makes every session start cold.
+    ``persist=True`` (or a directory path) keeps both halves of memory on disk
+    under ``<repo>/.tactics/``: the numeric record of which brief wins where, and
+    the lessons past runs wrote. Both are then wired in automatically — the store
+    into the policy, the lessons into every brief. The default is off, because
+    writing into someone's repository should be asked for, not assumed.
     """
     if max_workers > 1 and not getattr(target, "isolate", False):
         raise ValueError(
             "max_workers > 1 needs AgentWorkspace(isolate=True): parallel agents "
             "sharing one working tree make every result unattributable"
         )
-    tactics = tactics or [SingleAgentNarrow(), WriteTestFirst(), PlanThenPatch(), ReviewedSwarm()]
+    if persist:
+        root = persist if isinstance(persist, str) else getattr(target, "path", ".")
+        memory = memory or brief_memory(root)
+        lessons = lessons or brief_lessons(root)
+
+    tactics = tactics or [
+        SingleAgentNarrow(lessons=lessons),
+        WriteTestFirst(lessons=lessons),
+        PlanThenPatch(lessons=lessons),
+        ReviewedSwarm(lessons=lessons),
+    ]
 
     def plan(goal, board, target):  # noqa: ANN001
         if board.tasks:

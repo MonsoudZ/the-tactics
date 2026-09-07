@@ -114,6 +114,55 @@ def fan_out() -> None:
         ws.cleanup()
 
 
+def compounding() -> None:
+    """Run 1 teaches run 2 — through disk, not through this process."""
+    import json
+    import pathlib
+    import subprocess
+    import tempfile
+
+    from tactics.llm import ScriptedClient
+    from tactics.playbooks.agent_sdk import brief_lessons, run_and_learn, work_queue_goal
+
+    root = tempfile.mkdtemp(prefix="tactics-demo-compound-")
+    git = lambda *a: subprocess.run(["git", *a], cwd=root, capture_output=True, check=True)
+    git("init", "-q"); git("config", "user.email", "d@d"); git("config", "user.name", "d")
+    pathlib.Path(root, "seed.txt").write_text("seed\n")
+    git("add", "-A"); git("commit", "-qm", "seed")
+
+    sent: list[str] = []
+
+    def runner(brief, spec, bridge, ws):
+        sent.append(brief)
+        run = AgentRun(cost_usd=0.05)
+        if bridge.decide("Write", {"file_path": "work.txt"})[0]:
+            pathlib.Path(ws.path, "work.txt").write_text("done\n")
+        return run
+
+    lesson = "this suite needs PYTHONPATH=$PWD/src or it measures the wrong tree"
+    scribe_says = ScriptedClient([json.dumps({"lessons": [{"text": lesson, "evidence": "round 1"}]})])
+
+    ws = AgentWorkspace(root, check=["test", "-f", "work.txt"], runner=runner, isolate=True)
+    colony = build_delivery_colony(ws, persist=True, gate=AutoApprove(), max_rounds=1)
+    _result, written = run_and_learn(colony, work_queue_goal("do the work"), client=scribe_says)
+    ws.cleanup()
+
+    print("\n=== Compounding — run 1 writes down what it learned ===")
+    print(f"  brief run 1 was given : {sent[0]!r}")
+    print(f"  lessons the scribe wrote: {[lesson.text for lesson in written]}")
+    print(f"  on disk: {sorted(p.name for p in pathlib.Path(root, '.tactics').iterdir())}")
+
+    # A second process would see exactly this: nothing in memory, everything on disk.
+    ws2 = AgentWorkspace(root, check=["test", "-f", "work.txt"], runner=runner, isolate=True)
+    colony2 = build_delivery_colony(ws2, persist=True, gate=AutoApprove(), max_rounds=1)
+    colony2.run(work_queue_goal("do the next thing"))
+    ws2.cleanup()
+    print(f"\n  brief run 2 was given : {sent[-1].splitlines()[0]!r}")
+    print(f"  ...carrying the lesson: {lesson in sent[-1]}")
+    print(f"  what each brief has earned: "
+          f"{ {e.tactic: round(e.stats.mean_reward, 2) for e in colony2.memory.entries()} }")
+
+
 if __name__ == "__main__":
     # 1. Everything allowed — the agent works, the repo is measured, the colony learns.
     run("AutoApprove — the agent works", AutoApprove())
@@ -128,6 +177,9 @@ if __name__ == "__main__":
     # 4. Parallel ants, each in its own git worktree — max_workers > 1 is refused
     #    without isolation, because interleaved diffs cannot be attributed.
     fan_out()
+
+    # 5. And what one run learns, the next one starts with.
+    compounding()
 
     print(
         "\nReward came from re-running the check, never from the agent's summary.\n"

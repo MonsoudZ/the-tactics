@@ -124,6 +124,7 @@ precisely this framework. So don't compete with the harness; govern it.
 | `Outcome.cost` | `ResultMessage.total_cost_usd` | `Budget(max_cost=5.00)` is a real dollar ceiling on an autonomous swarm. |
 | journal attribution | PreToolUse `agent_type` | A swarm's audit trail says *which ant* asked — "code-reviewer subagent tool call: Bash". |
 | `Target.session` | one **git worktree** per ant | `max_workers > 1` without it is refused: parallel agents in one tree make every diff unattributable. Work comes back as `target.patches`; the main repo is never written. |
+| `JsonStore` + `JsonlLessons` | `<repo>/.tactics/` | `persist=True` keeps both halves of memory beside the code they describe: which brief wins here, and what past runs learned. |
 
 **Never send the brief's roster as the SDK's `allowed_tools`, and never gate
 through `can_use_tool`.** `allowed_tools` *grants* permission: a whole-tool entry
@@ -159,6 +160,21 @@ a check-based goal never completes — that is what `work_queue_goal` is for.
 satisfied at round 0 and the colony stops having done nothing. A run the gate
 held is rejected by the critic rather than learned from: it is evidence about
 the gate, not about the brief.
+
+**Compounding (`persist=True`, verified live).** Numeric memory (`JsonStore`)
+records which brief wins in which situation; verbal memory (`JsonlLessons`) holds
+what runs learned, and `BriefTactic._with_lessons` prepends the relevant ones to
+every brief — the half a fresh agent process cannot have, however good the
+harness is. Lessons go in the *brief*, never the system prompt: the system prompt
+**is** the shape being measured, so varying it would make two runs of the same
+tactic incomparable. `run_and_learn(colony, goal, client=...)` closes the loop —
+run, then `BriefScribe` distills the journal *plus the brief scoreboard*, because
+the durable lesson is almost always comparative. Verified across two processes:
+run 1 wrote `SingleAgentNarrow 1.0`, run 2 read it back, explored the untried
+brief, and added `WriteTestFirst 3 runs / 3.0` to the same file; briefs arrived
+carrying a stored lesson. Note what UCB does here — it tries an unmeasured brief
+before exploiting a proven one, so "it picked the winner" is only meaningful once
+every brief has a record.
 
 **Subagents (verified live).** The PreToolUse hook fires *inside* subagents too,
 carrying `agent_type` — so a brief cannot delegate its way around the gate, and
@@ -242,7 +258,21 @@ python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code a
   2 distinct, main repo clean, one patch applied back with `--3way`), and found
   three more (a check-based goal satisfied at round 0, the journal entry written
   before the measurement, gate-held runs polluting a brief's statistics).
-  Still unexercised: `max_turns`, and `max_workers` above 3.
+  Compounding is live too (`persist=True` across two processes; lessons reaching
+  a real agent's brief). Still unexercised: `max_turns`, and `max_workers` above 3.
+- **All parallel ants in a round pick the same brief.** The policy is consulted
+  once per ant against the same memory snapshot, so a 3-ant round produces three
+  samples of one brief rather than one sample each of three — exactly when you
+  most want the comparison. Fan-out still pays for throughput; it does not yet
+  pay for exploration. Fixing it means sampling without replacement (or an
+  optimistic in-round update) in the policy layer.
+- **The scribe has written nothing in five live runs.** The path is wired and
+  works (proven offline with a scripted client): it builds the prompt, the model
+  returns well-formed `{"lessons": []}`, and it correctly records nothing. But
+  every live run so far has been an uneventful success, and it is given one run's
+  journal against a cross-run scoreboard. Whether the conservatism is right or
+  the evidence is too thin is genuinely open — decide it with a repo where runs
+  fail in a repeating way, not by loosening the scribe.
 - **The single `Agent` loop isolates tactic errors but not `observe()`/goal-predicate
   errors.** The `Colony` (the production path) isolates everything. Keep `Target.observe`
   and `Goal.is_satisfied` total/non-throwing.
@@ -266,8 +296,9 @@ python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code a
 - [x] Playbook: agent-sdk — the Claude Agent SDK as a governed Target: competing
       briefs, PreToolUse hook → approval gate, dollar-denominated Budget, verified
       reward, git-worktree fan-out for parallel ants (`playbooks/agent_sdk.py`).
-      Next: `JsonStore` + `Scribe` wired in so briefs compound across runs, and a
-      tactic that picks among captured patches instead of applying by hand.
+      `persist=True` compounds both halves of memory across runs. Next: a tactic
+      that picks among captured patches instead of applying by hand, and per-round
+      exploration so parallel ants try *different* briefs.
 - [ ] Playbook: trading — alerts, shift/buy/sell against a goal.
 - [x] Playbook: lead-finder — score bad sites, draft + send outreach (`playbooks/lead_finder.py`, dry-run by default).
 - [ ] Playbook: gift-cards — production-readiness checks.
