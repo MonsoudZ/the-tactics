@@ -1211,3 +1211,104 @@ def test_a_staged_patch_still_lands_and_verifies(tmp_path):
         assert pathlib.Path(ws.path, "staged.py").exists()
     finally:
         ws.cleanup()
+
+
+def test_a_failed_delivery_is_retried_rather_than_declared_done():
+    # The live symptom: a colony on a genuinely broken repo ran exactly one round
+    # and stopped with "no open work", having recorded a 0. Failures could never
+    # repeat, so nothing could ever be learned from them repeating.
+    from tactics.core.outcome import Outcome
+
+    agent = ScriptedAgent(check_after_edit=False)
+    verdict = verification_critic().verify(
+        Outcome(success=False, reward=0.0, metrics={"denied": 0, "changed_files": 2}),
+        _ctx(_workspace(agent)),
+    )
+    assert verdict.accepted is True    # trustworthy, and worth learning from
+    assert verdict.done is False       # but the work is not finished
+
+
+def test_a_verified_success_finishes_the_task():
+    from tactics.core.outcome import Outcome
+
+    agent = ScriptedAgent()
+    agent.edited = True
+    verdict = verification_critic().verify(
+        Outcome(success=True, reward=1.0, metrics={"changed_files": 2}),
+        _ctx(_workspace(agent)),
+    )
+    assert verdict.accepted is True and verdict.done is True
+
+
+def test_a_colony_on_a_repo_it_cannot_fix_keeps_trying(tmp_path):
+    ws = AgentWorkspace(_git_repo(tmp_path), check=["test", "-f", "impossible.txt"],
+                        runner=_writing_runner(), isolate=True)
+    try:
+        colony = build_delivery_colony(ws, gate=AutoApprove(), max_workers=1, max_rounds=3)
+        result = colony.run(delivery_goal("do the impossible"))
+        runs = [e for e in result.journal.events if e.kind == "agent.run"]
+        assert len(runs) == 3                       # three attempts, not one
+        assert result.board.counts()["done"] == 0
+    finally:
+        ws.cleanup()
+
+
+def test_the_journal_says_why_a_check_failed_not_just_that_it_did():
+    # Six live runs produced no lesson, and this is why: the journal carried a
+    # tally, never a cause. A failure that recurs every round has to be legible
+    # *as* a recurrence to anything reading the trail afterwards.
+    journal = Journal()
+    agent = ScriptedAgent(check_after_edit=False)
+    SingleAgentNarrow().execute(_ctx(_workspace(agent), journal=journal))
+    failure = next(e for e in journal.events if e.kind == "check.failed")
+    assert failure.data["tactic"] == "SingleAgentNarrow"
+    assert "1 failed" in failure.data["detail"]
+
+
+def test_a_passing_check_records_no_failure():
+    journal = Journal()
+    SingleAgentNarrow().execute(_ctx(_workspace(ScriptedAgent()), journal=journal))
+    assert not [e for e in journal.events if e.kind == "check.failed"]
+
+
+def test_persist_wires_lessons_into_caller_supplied_tactics(tmp_path):
+    # Otherwise `persist=True` silently means "numbers only" as soon as you pass
+    # your own roster — which is exactly how three live runs distilled nothing
+    # while looking like the scribe had declined.
+    ws = AgentWorkspace(_git_repo(tmp_path), runner=_writing_runner())
+    colony = build_delivery_colony(ws, tactics=[SingleAgentNarrow()], persist=True)
+    assert colony.tactics[0].lessons is not None
+
+
+def test_an_explicit_lesson_store_on_a_tactic_is_left_alone(tmp_path):
+    mine = InMemoryLessons()
+    ws = AgentWorkspace(_git_repo(tmp_path), runner=_writing_runner())
+    colony = build_delivery_colony(ws, tactics=[SingleAgentNarrow(lessons=mine)], persist=True)
+    assert colony.tactics[0].lessons is mine
+
+
+def test_a_skipped_distillation_says_so_in_the_journal(tmp_path):
+    ws = AgentWorkspace(_git_repo(tmp_path), check=["true"], runner=_writing_runner())
+    colony = build_delivery_colony(ws, gate=AutoApprove(), max_rounds=1)
+    result, written = run_and_learn(colony, delivery_goal("x"))  # no client
+    assert written == []
+    skipped = next(e for e in result.journal.events if e.kind == "scribe.skipped")
+    assert skipped.data["reason"] == "no client"
+
+
+def test_the_verdict_reason_distinguishes_a_fix_from_a_reproduced_failure():
+    # The scribe read "check re-run agrees" on three failing rounds and had to
+    # work out that agreement meant the failure reproduced, not that it passed.
+    from tactics.core.outcome import Outcome
+
+    agent = ScriptedAgent(check_after_edit=False)
+    ctx = _ctx(_workspace(agent))
+    failing = verification_critic().verify(
+        Outcome(success=False, reward=0.0, metrics={"changed_files": 2}), ctx)
+    assert "still failing" in failing.reason
+
+    agent.edited = True
+    agent.check_after_edit = True
+    passing = verification_critic().verify(
+        Outcome(success=True, reward=1.0, metrics={"changed_files": 2}), ctx)
+    assert "confirms the fix" in passing.reason

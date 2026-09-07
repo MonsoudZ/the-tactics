@@ -750,6 +750,13 @@ class BriefTactic(Tactic):
                            notes=f"agent left the working tree untouched{held}")
 
         passed, output = ctx.target.verify()
+        if journal is not None and not passed:
+            # The *reason* a check failed, in the audit trail rather than only in
+            # this Outcome's notes. Without it the journal says a run failed but
+            # never what broke, so a failure that recurs every round looks like
+            # three anonymous zeroes — and nothing downstream, the scribe least of
+            # all, can tell a repeating cause from a run of bad luck.
+            journal.record("check.failed", tactic=self.name, detail=output.strip()[-400:])
         return Outcome(
             success=passed,
             reward=1.0 if passed else 0.0,
@@ -1050,7 +1057,14 @@ def verification_critic() -> FunctionCritic:
                            reason=f"claimed success but check fails: {output.strip()[-200:]}")
         if not outcome.success and passed and outcome.metrics.get("changed_files"):
             return Verdict(accepted=False, reason="claimed failure but check passes")
-        return Verdict(accepted=True, reason="check re-run agrees")
+        # The task here is "make this work", not "have a go at it": a verified
+        # failure is trusted and learned from, and goes back on the board.
+        return Verdict(
+            accepted=True,
+            done=outcome.success,
+            reason="check re-run confirms the fix" if passed
+                   else "check re-run confirms it is still failing",
+        )
 
     return FunctionCritic(verify)
 
@@ -1125,6 +1139,12 @@ def run_and_learn(colony: Colony, goal: Goal, *, client: Any = None, lessons: Le
         (t.lessons for t in colony.tactics if getattr(t, "lessons", None) is not None), None
     )
     if client is None or store is None:
+        # Say so in the trail rather than returning an empty list that looks
+        # like "the scribe considered it and declined".
+        journal = getattr(result, "journal", None)
+        if journal is not None:
+            journal.record("scribe.skipped",
+                           reason="no client" if client is None else "no lesson store")
         return result, []
     written = BriefScribe(client, store, memory=colony.memory).distill(
         result, playbook=getattr(colony.target, "name", None)
@@ -1188,6 +1208,13 @@ def build_delivery_colony(
         PlanThenPatch(lessons=lessons),
         ReviewedSwarm(lessons=lessons),
     ]
+    if lessons is not None:
+        # Caller-supplied tactics get the store too. Otherwise `persist=True`
+        # quietly means "persist numbers only" the moment you pass your own
+        # roster, and the verbal half goes missing without a word.
+        for tactic in tactics:
+            if getattr(tactic, "lessons", "unset") is None:
+                tactic.lessons = lessons
 
     def plan(goal, board, target):  # noqa: ANN001
         if board.tasks:

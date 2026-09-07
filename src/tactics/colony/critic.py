@@ -30,6 +30,12 @@ class Verdict:
     # Optionally override the reward the colony learns from (e.g. discount an
     # unverified-but-plausible result). Defaults to the outcome's own reward.
     reward: float | None = None
+    # Whether this outcome *finishes* the task, which is a different question
+    # from whether it can be trusted. "Run this check" is done once the check
+    # has run, pass or fail; "make the suite pass" is not done until it passes.
+    # ``None`` keeps the historical default (an accepted outcome completes its
+    # task); a critic that knows better returns False to send it back for retry.
+    done: bool | None = None
 
 
 class Critic(ABC):

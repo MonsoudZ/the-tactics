@@ -12,6 +12,7 @@ from tactics.colony import (
     FunctionCritic,
     FunctionPlanner,
     SingleTaskPlanner,
+    Verdict,
 )
 
 
@@ -261,3 +262,77 @@ def test_a_view_is_released_even_when_the_ant_errors():
     )
     colony.run(Goal(name="g"))
     assert target.released == target.handed_out != []  # no leak on the error path
+
+
+# --- trustworthy is not the same as finished ---------------------------------
+
+
+def _retry_colony(critic, tactic, *, max_rounds=3):
+    return Colony(
+        Items(1), [tactic], SingleTaskPlanner(),
+        memory=InMemoryStore(), critic=critic, max_workers=1, max_rounds=max_rounds,
+    )
+
+
+def test_an_accepted_outcome_completes_its_task_by_default():
+    # The historical behaviour, unchanged: a critic that says nothing about
+    # completion still finishes the task.
+    class Fails(Tactic):
+        def execute(self, ctx) -> Outcome:
+            return Outcome.loss()
+
+    colony = _retry_colony(AcceptCritic(), Fails())
+    result = colony.run(Goal(name="g"))
+    assert result.board.counts()["done"] == 1
+    assert result.rounds == 1
+
+
+def test_a_verified_failure_goes_back_on_the_board():
+    # Found live: an honest failure was accepted (correctly — it is worth
+    # learning from) and then marked *done*, so the colony declared victory on a
+    # loss and stopped with "no open work". Retries never happened.
+    attempts = []
+
+    class Fails(Tactic):
+        def execute(self, ctx) -> Outcome:
+            attempts.append(1)
+            return Outcome.loss()
+
+    colony = _retry_colony(
+        FunctionCritic(lambda outcome, ctx: Verdict(accepted=True, done=outcome.success)),
+        Fails(),
+    )
+    result = colony.run(Goal(name="g"))
+    assert len(attempts) == 3            # retried every round instead of giving up
+    assert result.board.counts()["done"] == 0
+    assert "task_unfinished" in {f.kind for f in result.findings}
+
+
+def test_an_unfinished_outcome_is_still_learned_from():
+    memory = InMemoryStore()
+
+    class Fails(Tactic):
+        def execute(self, ctx) -> Outcome:
+            return Outcome.loss()
+
+    colony = Colony(
+        Items(1), [Fails()], SingleTaskPlanner(), memory=memory,
+        critic=FunctionCritic(lambda o, c: Verdict(accepted=True, done=False)),
+        max_workers=1, max_rounds=2,
+    )
+    result = colony.run(Goal(name="g"))
+    assert sum(e.stats.trials for e in memory.entries()) == 2  # both attempts recorded
+    assert sum(r.accepted for r in result.history) == 2        # and counted as learned from
+
+
+def test_a_success_still_finishes_the_task():
+    class Works(Tactic):
+        def execute(self, ctx) -> Outcome:
+            return Outcome.win(1.0)
+
+    colony = _retry_colony(
+        FunctionCritic(lambda outcome, ctx: Verdict(accepted=True, done=outcome.success)),
+        Works(),
+    )
+    result = colony.run(Goal(name="g"))
+    assert result.board.counts()["done"] == 1

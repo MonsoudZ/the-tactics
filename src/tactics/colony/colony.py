@@ -229,12 +229,22 @@ class Colony:
                         reward=reward, success=r.outcome.success,
                         features=r.ctx.features, goal=goal.name,
                     )
-                    self.board.complete(r.task, r.outcome)
-                    self.board.deposit(r.task.signal, max(reward, 0.0))  # reinforce trail
-                    self.board.post_finding(
-                        r.tactic.name, "task_done", task=r.task.id, reward=reward
-                    )
-                    accepted += 1
+                    accepted += 1  # trusted, and therefore learned from
+                    # Trustworthy is not the same as finished. An honest failure
+                    # is worth learning from *and* worth trying again; completing
+                    # it here would have the colony declare victory on a loss and
+                    # stop with "no open work".
+                    if verdict.done is None or verdict.done:
+                        self.board.complete(r.task, r.outcome)
+                        self.board.deposit(r.task.signal, max(reward, 0.0))  # reinforce trail
+                        self.board.post_finding(
+                            r.tactic.name, "task_done", task=r.task.id, reward=reward
+                        )
+                    else:
+                        self.board.post_finding(
+                            r.tactic.name, "task_unfinished", task=r.task.id, reward=reward
+                        )
+                        self._retry_or_fail(r.task, r.outcome)
                 else:
                     self.board.post_finding(
                         r.tactic.name, "rejected", task=r.task.id, reason=verdict.reason

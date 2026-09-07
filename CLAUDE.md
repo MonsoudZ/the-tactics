@@ -49,7 +49,7 @@ Many ants over a shared board, coordinating by pheromones. Built on the core loo
 |---------|------|-----|
 | `Blackboard` | `colony/blackboard.py` | Shared Tasks + Findings + **pheromones** (decay & reinforce). Thread-safe. |
 | `Planner` | `colony/planner.py` | Goal → Tasks; re-runs each round to post follow-ups from Findings. |
-| `Critic` | `colony/critic.py` | Verifies an Outcome before it's trusted. Learning integrity **and** the safety gate. |
+| `Critic` | `colony/critic.py` | Verifies an Outcome before it's trusted. Learning integrity **and** the safety gate. `Verdict.done` separates "trustworthy" from "finished", so a verified failure is learned from *and* retried. |
 | `Colony` | `colony/colony.py` | Each round: plan → claim top tasks (pheromone-biased) → run ants **in parallel** → critic verifies → learn + reinforce → evaporate. |
 
 Important: the Critic gates **learning and task-completion**, not a side effect a
@@ -284,17 +284,24 @@ python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code a
   Compounding is live too (`persist=True` across two processes; lessons reaching
   a real agent's brief), and so is per-round spread (3 ants, 3 different briefs,
   3 distinct patches, against memory that favoured one of them).
+  **The scribe is live too, and settling why it wrote nothing for six runs took
+  three bug fixes, none of them in the scribe.** A colony *completed* any task
+  whose failure the critic verified — trustworthy was conflated with finished —
+  so it stopped after one round and failures could never recur. The journal
+  recorded that a check failed but never why, so a cause that repeated every
+  round read as three anonymous zeroes. And `persist=True` did not wire the
+  lesson store into caller-supplied tactics, so the scribe was not even called.
+  With all three fixed, on a repo red in a way agents cannot fix (a test importing
+  an uninstallable package), three briefs failed identically across three rounds
+  and the scribe wrote two lessons: it named the recurring `ModuleNotFoundError`,
+  diagnosed it as environmental rather than logical, and observed that switching
+  briefs without addressing it wastes rounds. The conservatism was never the
+  problem — it had been shown a tally, never a failure.
+
   Patch selection is live too (3 candidates from 3 briefs, all re-verified,
   smallest landed, suite green on the result; a real LLM judge returning a
   reasoned choice, and the fail-closed fallback firing for real when the judge
   errored). Still unexercised: `max_turns`, and `max_workers` above 3.
-- **The scribe has written nothing in five live runs.** The path is wired and
-  works (proven offline with a scripted client): it builds the prompt, the model
-  returns well-formed `{"lessons": []}`, and it correctly records nothing. But
-  every live run so far has been an uneventful success, and it is given one run's
-  journal against a cross-run scoreboard. Whether the conservatism is right or
-  the evidence is too thin is genuinely open — decide it with a repo where runs
-  fail in a repeating way, not by loosening the scribe.
 - **The single `Agent` loop isolates tactic errors but not `observe()`/goal-predicate
   errors.** The `Colony` (the production path) isolates everything. Keep `Target.observe`
   and `Goal.is_satisfied` total/non-throwing.
@@ -320,8 +327,8 @@ python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code a
       reward, git-worktree fan-out for parallel ants (`playbooks/agent_sdk.py`).
       `persist=True` compounds both halves of memory across runs, parallel rounds
       spread across briefs, and `ApplyBestPatch` chooses among the candidates.
-      Next: run it against a repo whose failures repeat, so the scribe has
-      something durable to record.
+      Verified end to end on a repo whose failures repeat: the scribe records
+      the recurring cause and future briefs start carrying it.
 - [ ] Playbook: trading — alerts, shift/buy/sell against a goal.
 - [x] Playbook: lead-finder — score bad sites, draft + send outreach (`playbooks/lead_finder.py`, dry-run by default).
 - [ ] Playbook: gift-cards — production-readiness checks.
