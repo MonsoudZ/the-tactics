@@ -119,11 +119,15 @@ class Colony:
 
     def _work(self, task: Task, goal: Goal) -> _AntResult:
         ctx = None
+        worker = None
         try:
-            data = self.target.observe()
-            features = self.target.features(data)
+            # A target may hand this ant a private view of the domain, so parallel
+            # ants don't trample each other. Default is the target itself.
+            worker = self.target.session(task)
+            data = worker.observe()
+            features = worker.features(data)
             ctx = Context(
-                target=self.target, goal=goal, data=data, features=features,
+                target=worker, goal=goal, data=data, features=features,
                 task=task, gate=self.gate, journal=self.journal,
             )
             applicable = [t for t in self.tactics if t.is_applicable(ctx)]
@@ -134,7 +138,16 @@ class Colony:
             return _AntResult(task, tactic, ctx, outcome)
         except Exception as exc:  # failure isolation across the parallel batch
             self.journal.record("error", task=task.id, error=repr(exc))
+            if ctx is None and worker is not None:
+                self._release(worker)  # nothing downstream will hold this view
             return _AntResult(task, None, ctx, Outcome.failed(exc), errored=True)
+
+    def _release(self, worker) -> None:  # noqa: ANN001
+        """Give a per-ant view back. A leak here is a disk leak, never a crash."""
+        try:
+            self.target.release(worker)
+        except Exception as exc:  # noqa: BLE001
+            self.journal.record("error", stage="release", error=repr(exc))
 
     def _run_batch(self, batch: list[Task], goal: Goal) -> list[_AntResult]:
         if self.max_workers == 1 or len(batch) == 1:
@@ -225,6 +238,10 @@ class Colony:
                     )
                     self._retry_or_fail(r.task, r.outcome)
                     rejected += 1
+
+            for r in ant_results:
+                if r.ctx is not None:
+                    self._release(r.ctx.target)
 
             self.board.evaporate(self.evaporation)
             result.history.append(

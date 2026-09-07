@@ -20,7 +20,7 @@ a new domain without editing the core, and it just starts competing on results.
 | Concept   | File                     | Job |
 |-----------|--------------------------|-----|
 | `Goal`    | `core/goal.py`           | What we want + a predicate that recognizes "done". |
-| `Target`  | `core/target.py`         | A domain we plug into. `observe()` returns state; you add domain methods tactics call. |
+| `Target`  | `core/target.py`         | A domain we plug into. `observe()` returns state; you add domain methods tactics call. `session(task)`/`release()` optionally hand each parallel worker a private view (default: one shared world). |
 | `Tactic`  | `core/tactic.py`         | One reusable strategy. `is_applicable()` + `execute() → Outcome`. |
 | `Outcome` | `core/outcome.py`        | The learning signal: `success` + `reward`. Bigger reward = better. |
 | `Policy`  | `core/policy.py`         | Chooses the next tactic (explore/exploit) via an `Estimator`. |
@@ -123,6 +123,7 @@ precisely this framework. So don't compete with the harness; govern it.
 | `GateBridge` | `ctx.gate` → the SDK's **PreToolUse hook** | Every write, Bash command, and unknown tool is classified and decided by *our* gate and lands in *our* journal. `DryRun` = a colony that cannot write a byte. |
 | `Outcome.cost` | `ResultMessage.total_cost_usd` | `Budget(max_cost=5.00)` is a real dollar ceiling on an autonomous swarm. |
 | journal attribution | PreToolUse `agent_type` | A swarm's audit trail says *which ant* asked — "code-reviewer subagent tool call: Bash". |
+| `Target.session` | one **git worktree** per ant | `max_workers > 1` without it is refused: parallel agents in one tree make every diff unattributable. Work comes back as `target.patches`; the main repo is never written. |
 
 **Never send the brief's roster as the SDK's `allowed_tools`, and never gate
 through `can_use_tool`.** `allowed_tools` *grants* permission: a whole-tool entry
@@ -143,9 +144,21 @@ counts only the top-level loop, so `ReviewedSwarm` would look artificially cheap
 and the Budget would under-count the tactic most able to run away with the bill.
 Reward is 1.0 only when the check passes *and* the diff is non-empty — a
 confident summary over an empty diff is the exact failure this guards. Efficiency
-lives on `cost`, not `reward`. `max_workers=1` is the default because parallel
-ants would be parallel agents editing one working tree; give each its own git
-worktree before raising it.
+lives on `cost`, not `reward`.
+
+**Fan-out (verified live: 3 agents, 48s, 3 patches, main repo untouched).** Set
+`AgentWorkspace(isolate=True)` and `max_workers > 1`; the unsafe combination is
+refused, not warned about. Each ant gets a detached worktree at HEAD, verifies in
+its *own* tree (so reward is attributable), and its work is lifted out as a
+`Patch` before the worktree is destroyed. Landing one is a separate deliberate
+act (`apply_patch`, `--3way`). Two consequences to know: the check runs *inside*
+the worktree, so make it self-contained (`PYTHONPATH=$PWD/src …` — an editable
+install silently measures the main tree); and since the main repo never changes,
+a check-based goal never completes — that is what `work_queue_goal` is for.
+`delivery_goal` is for **repair** (red → green); on a healthy repo it is
+satisfied at round 0 and the colony stops having done nothing. A run the gate
+held is rejected by the critic rather than learned from: it is evidence about
+the gate, not about the brief.
 
 **Subagents (verified live).** The PreToolUse hook fires *inside* subagents too,
 carrying `agent_type` — so a brief cannot delegate its way around the gate, and
@@ -225,7 +238,11 @@ python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code a
   `Agent` not `Task`, `usage` undercounting subagent tokens ~18x, multiple result
   messages) — all covered by tests. Under `DryRun` with a delegate-first brief:
   21 hook firings, 6 of them inside the subagent, 15 denied, 0 bytes written.
-  Still unexercised: `max_turns`, and parallel `max_workers > 1`.
+  Parallel fan-out is live too (3 agents in their own worktrees, 48s, 3 patches,
+  2 distinct, main repo clean, one patch applied back with `--3way`), and found
+  three more (a check-based goal satisfied at round 0, the journal entry written
+  before the measurement, gate-held runs polluting a brief's statistics).
+  Still unexercised: `max_turns`, and `max_workers` above 3.
 - **The single `Agent` loop isolates tactic errors but not `observe()`/goal-predicate
   errors.** The `Colony` (the production path) isolates everything. Keep `Target.observe`
   and `Goal.is_satisfied` total/non-throwing.
@@ -247,9 +264,10 @@ python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code a
 - [x] Playbook: repo-health — audit any repo (tests/lint/secrets) via shell-out
       (`playbooks/repo_health.py`); the reusable base the focumate audits build on.
 - [x] Playbook: agent-sdk — the Claude Agent SDK as a governed Target: competing
-      briefs, `can_use_tool` → approval gate, dollar-denominated Budget, verified
-      reward (`playbooks/agent_sdk.py`). Next: git-worktree fan-out so briefs can
-      run in parallel, and `JsonStore` + `Scribe` wired in so briefs compound.
+      briefs, PreToolUse hook → approval gate, dollar-denominated Budget, verified
+      reward, git-worktree fan-out for parallel ants (`playbooks/agent_sdk.py`).
+      Next: `JsonStore` + `Scribe` wired in so briefs compound across runs, and a
+      tactic that picks among captured patches instead of applying by hand.
 - [ ] Playbook: trading — alerts, shift/buy/sell against a goal.
 - [x] Playbook: lead-finder — score bad sites, draft + send outreach (`playbooks/lead_finder.py`, dry-run by default).
 - [ ] Playbook: gift-cards — production-readiness checks.

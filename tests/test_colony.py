@@ -155,3 +155,109 @@ def test_colony_requires_a_tactic():
 
     with pytest.raises(ValueError):
         Colony(Items(1), [], seed_n_tasks(1))
+
+
+# --- per-worker views (Target.session / Target.release) ----------------------
+#
+# Domain-free: a Target may hand each ant a private view of the domain so
+# parallel ants don't collide. The git-worktree fan-out in the agent-sdk playbook
+# is one implementation; nothing here knows that.
+
+
+class Shared(Target):
+    """A target that hands out a numbered private view per task."""
+
+    name = "shared"
+
+    def __init__(self) -> None:
+        self.handed_out: list[str] = []
+        self.released: list[str] = []
+        self._lock = threading.Lock()
+
+    def observe(self) -> dict:
+        return {"view": "main"}
+
+    def session(self, task=None):  # noqa: ANN001
+        with self._lock:
+            view = _View(self, f"view-{len(self.handed_out)}")
+            self.handed_out.append(view.label)
+        return view
+
+    def release(self, session) -> None:  # noqa: ANN001
+        with self._lock:
+            self.released.append(session.label)
+
+
+class _View(Target):
+    name = "view"
+
+    def __init__(self, parent: Shared, label: str) -> None:
+        self.parent, self.label = parent, label
+
+    def observe(self) -> dict:
+        return {"view": self.label}
+
+
+def test_a_target_defaults_to_one_shared_view():
+    target = Items(1)
+    assert target.session(None) is target
+    target.release(target)  # no-op by default
+
+
+def test_each_ant_acts_on_its_own_view_and_it_is_given_back():
+    target = Shared()
+    seen: list[str] = []
+
+    class Look(Tactic):
+        def execute(self, ctx) -> Outcome:
+            seen.append(ctx.data["view"])
+            return Outcome.win(1.0)
+
+    colony = Colony(
+        target, [Look()],
+        FunctionPlanner(lambda g, b, t: [b.post_task(f"t{i}") for i in range(3)] if not b.tasks else []),
+        memory=InMemoryStore(), max_workers=3, max_rounds=1,
+    )
+    colony.run(Goal(name="g"))
+
+    assert sorted(seen) == ["view-0", "view-1", "view-2"]   # never the shared main view
+    assert sorted(target.released) == sorted(target.handed_out)  # every view given back
+
+
+def test_the_critic_verifies_through_the_same_view_the_ant_used():
+    # If the Critic re-measured the shared target instead, every parallel result
+    # would be judged against work it did not do.
+    target = Shared()
+    verified: list[str] = []
+
+    class Noop(Tactic):
+        def execute(self, ctx) -> Outcome:
+            return Outcome.win(1.0)
+
+    def critic(outcome, ctx):
+        verified.append(ctx.target.label)
+        return True
+
+    colony = Colony(
+        target, [Noop()],
+        FunctionPlanner(lambda g, b, t: [b.post_task("t0"), b.post_task("t1")] if not b.tasks else []),
+        memory=InMemoryStore(), critic=FunctionCritic(critic), max_workers=2, max_rounds=1,
+    )
+    colony.run(Goal(name="g"))
+    assert sorted(verified) == ["view-0", "view-1"]
+
+
+def test_a_view_is_released_even_when_the_ant_errors():
+    class Exploding(Shared):
+        def session(self, task=None):  # noqa: ANN001
+            view = super().session(task)
+            view.observe = lambda: 1 / 0  # blow up after the view is handed out
+            return view
+
+    target = Exploding()
+    colony = Colony(
+        target, [Process()], SingleTaskPlanner(),
+        memory=InMemoryStore(), max_workers=1, max_rounds=1,
+    )
+    colony.run(Goal(name="g"))
+    assert target.released == target.handed_out != []  # no leak on the error path

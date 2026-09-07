@@ -29,6 +29,24 @@ class Target(ABC):
         """Return a fresh snapshot of the domain's current state."""
         raise NotImplementedError
 
+    def session(self, task: Any = None) -> "Target":
+        """Return the view of this domain one worker should act on.
+
+        Default: the domain itself — one shared world, which is what most targets
+        want. Override when concurrent workers would collide (a repo two agents
+        both edit, an account two tactics both trade) to hand each worker a
+        private view, and pair it with :meth:`release`.
+
+        The Colony calls this per task and puts the result in that ant's Context,
+        so the tactic, the goal predicate, and the Critic all measure the *same*
+        view — which is what makes a parallel result attributable to the ant that
+        produced it.
+        """
+        return self
+
+    def release(self, session: "Target") -> None:
+        """Tear down a view handed out by :meth:`session`. Default: nothing."""
+
     def features(self, data: dict[str, Any]) -> dict[str, Any]:
         """Summarize a snapshot into a small, hashable dict for learning buckets.
 

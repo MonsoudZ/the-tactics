@@ -77,6 +77,43 @@ def run(label: str, gate) -> None:
             print(f"  {event.kind:<12} {event.data}")
 
 
+def fan_out() -> None:
+    """Three ants, three git worktrees, one repo — and the repo stays clean."""
+    import pathlib
+    import subprocess
+    import tempfile
+
+    from tactics.playbooks.agent_sdk import work_queue_goal
+
+    root = tempfile.mkdtemp(prefix="tactics-demo-repo-")
+    git = lambda *a: subprocess.run(["git", *a], cwd=root, capture_output=True, check=True)
+    git("init", "-q"); git("config", "user.email", "d@d"); git("config", "user.name", "d")
+    pathlib.Path(root, "seed.txt").write_text("seed\n")
+    git("add", "-A"); git("commit", "-qm", "seed")
+
+    def runner(brief, spec, bridge, ws):
+        """Each ant writes a file naming its own tree, if the gate allows it."""
+        run = AgentRun(cost_usd=0.05)
+        allowed, _ = bridge.decide("Write", {"file_path": "work.txt"})
+        run.tools_used.append("Write")
+        if allowed:
+            pathlib.Path(ws.path, "work.txt").write_text(f"done in {pathlib.Path(ws.path).name}\n")
+        run.denied = list(bridge.denied)
+        return run
+
+    ws = AgentWorkspace(root, check=["test", "-f", "work.txt"], runner=runner, isolate=True)
+    try:
+        colony = build_delivery_colony(ws, gate=AutoApprove(), max_workers=3, max_rounds=1)
+        colony.run(work_queue_goal("do the work"))
+        print("\n=== Fan-out — 3 ants, 3 worktrees, 1 repo ===")
+        print(f"  patches captured : {len(ws.patches)} ({len({p.text for p in ws.patches})} distinct)")
+        print(f"  main repo dirty  : {ws.changed_files()}   <- never written to")
+        ok, _ = ws.apply_patch(ws.patches[0])
+        print(f"  landed one patch : ok={ok}, repo now {ws.changed_files()}")
+    finally:
+        ws.cleanup()
+
+
 if __name__ == "__main__":
     # 1. Everything allowed — the agent works, the repo is measured, the colony learns.
     run("AutoApprove — the agent works", AutoApprove())
@@ -87,6 +124,10 @@ if __name__ == "__main__":
 
     # 3. The realistic posture: edits auto-approve, `git push` goes to a human.
     run("PolicyGate — edits fine, push escalates", PolicyGate(escalate=lambda p, c: False))
+
+    # 4. Parallel ants, each in its own git worktree — max_workers > 1 is refused
+    #    without isolation, because interleaved diffs cannot be attributed.
+    fan_out()
 
     print(
         "\nReward came from re-running the check, never from the agent's summary.\n"

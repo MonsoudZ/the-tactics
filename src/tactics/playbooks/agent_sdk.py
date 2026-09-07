@@ -46,8 +46,13 @@ without it.
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import subprocess
+import tempfile
+import threading
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -264,6 +269,24 @@ class BriefSpec:
 
 
 @dataclass
+class Patch:
+    """One ant's work, lifted out of its worktree before the worktree is destroyed.
+
+    Under isolation the main repository is never written to, so this is the whole
+    product of a parallel run. Landing it is a separate, deliberate act — see
+    :meth:`AgentWorkspace.apply_patch`.
+    """
+
+    task: str
+    text: str
+    files: list[str] = field(default_factory=list)
+    tactic: str = ""
+
+    def __bool__(self) -> bool:
+        return bool(self.text.strip())
+
+
+@dataclass
 class AgentRun:
     """What one SDK run produced. ``cost_usd`` is what the Budget spends."""
 
@@ -395,12 +418,102 @@ class AgentWorkspace(Target):
         runner: Callable[[str, BriefSpec, "GateBridge | None", "AgentWorkspace"], AgentRun] | None = None,
         shell: Callable[[list[str]], tuple[int, str]] | None = None,
         model: str | None = None,
+        isolate: bool = False,
     ) -> None:
         self.path = path
         self.check = list(check) if check else ["python3", "-m", "pytest", "-q"]
         self.model = model
+        self.isolate = isolate
         self._runner = runner or _sdk_runner
+        self._custom_shell = shell is not None
         self._shell = shell or self._subprocess
+        self._lock = threading.Lock()
+        self._worktree_root: str | None = None
+        self.patches: list[Patch] = []
+        self.task_id: str = ""  # set on a session, for patch attribution
+
+    # --- per-ant isolation ---------------------------------------------------
+
+    def session(self, task: Any = None) -> "AgentWorkspace":
+        """Hand this ant its own git worktree, so parallel ants can't collide.
+
+        Without this, ``max_workers > 1`` means several agents editing one working
+        tree: the diffs interleave, and no result can be attributed to the ant
+        that produced it — which corrupts the learning signal rather than merely
+        losing work. Each session is a detached checkout of HEAD, so it starts
+        from a known commit and never sees another ant's half-finished edit.
+
+        Note the two consequences worth knowing before you turn this on: the
+        main repository is never written to (work comes back as a :class:`Patch`),
+        and the check command runs *inside* the worktree — so make it
+        self-contained, or it will measure the wrong tree.
+        """
+        if not self.isolate:
+            return self
+        with self._lock:
+            if self._worktree_root is None:
+                # Outside the repo, or git would treat it as untracked content.
+                self._worktree_root = tempfile.mkdtemp(prefix="tactics-worktrees-")
+            path = os.path.join(self._worktree_root, f"ant-{uuid.uuid4().hex[:8]}")
+            code, out = self.run(["git", "worktree", "add", "--detach", path, "HEAD"])
+        if code != 0:
+            # Fail loudly. Silently sharing the main tree is the exact corruption
+            # this method exists to prevent.
+            raise RuntimeError(f"could not create worktree at {path}: {out.strip()[-300:]}")
+        child = AgentWorkspace(
+            path,
+            check=self.check,
+            runner=self._runner,
+            # A custom shell is a test seam and passes through; the default one is
+            # bound to its owner's path, so the child must build its own.
+            shell=self._shell if self._custom_shell else None,
+            model=self.model,
+        )
+        child.task_id = str(getattr(task, "id", "") or "")
+        return child
+
+    def release(self, session: "Target") -> None:
+        """Lift the work out as a patch, then remove the worktree."""
+        if session is self or not isinstance(session, AgentWorkspace):
+            return
+        patch = session.capture_patch()
+        with self._lock:
+            if patch:
+                self.patches.append(patch)
+        self.run(["git", "worktree", "remove", "--force", session.path])
+
+    def capture_patch(self) -> Patch:
+        """The full diff of this workspace, including files the agent created."""
+        self.run(["git", "add", "-A", "-N"])  # intent-to-add: untracked files show up
+        _code, text = self.run(["git", "diff"])
+        return Patch(task=self.task_id, text=text, files=self.changed_files())
+
+    def apply_patch(self, patch: Patch) -> tuple[bool, str]:
+        """Land a patch on this repository. Irreversible enough to gate.
+
+        Concurrent ants can produce patches that touch the same lines; ``--3way``
+        resolves what it can and fails loudly on the rest rather than mangling
+        the tree.
+        """
+        handle, tmp = tempfile.mkstemp(suffix=".patch")
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as fh:
+                fh.write(patch.text if patch.text.endswith("\n") else patch.text + "\n")
+            code, out = self.run(["git", "apply", "--3way", tmp])
+            return code == 0, out
+        finally:
+            os.unlink(tmp)
+
+    def cleanup(self) -> None:
+        """Remove every worktree this workspace created. Safe to call twice."""
+        with self._lock:
+            root, self._worktree_root = self._worktree_root, None
+        if not root:
+            return
+        for name in sorted(os.listdir(root)):
+            self.run(["git", "worktree", "remove", "--force", os.path.join(root, name)])
+        self.run(["git", "worktree", "prune"])
+        shutil.rmtree(root, ignore_errors=True)
 
     # --- shell seam ----------------------------------------------------------
 
@@ -499,16 +612,20 @@ class BriefTactic(Tactic):
         }
 
         journal = getattr(ctx, "journal", None)
-        if journal is not None:
-            journal.record("agent.run", tactic=self.name, **metrics, error=run.error)
 
         if run.error:
+            if journal is not None:
+                journal.record("agent.run", tactic=self.name, **metrics)
             return Outcome(success=False, reward=0.0, cost=cost, metrics=metrics,
                            notes=f"agent run failed: {run.error[:200]}")
 
         # Measured against the baseline, not against absolute dirtiness.
         changed = sorted(set(ctx.target.changed_files()) - before_files)
         metrics["changed_files"] = len(changed)
+        # Journalled after the measurement, so the audit trail carries what the
+        # run actually did rather than only what it was asked to do.
+        if journal is not None:
+            journal.record("agent.run", tactic=self.name, **metrics)
         if ctx.target.snapshot() == before_snapshot:
             held = f" ({len(run.denied)} tool call(s) held by the gate)" if run.denied else ""
             return Outcome(success=False, reward=0.0, cost=cost, metrics=metrics,
@@ -602,12 +719,30 @@ class ReviewedSwarm(BriefTactic):
 
 
 def delivery_goal(description: str, name: str = "delivery") -> Goal:
-    """A goal that is satisfied when the workspace's own check command passes."""
+    """A goal satisfied when the workspace's check command passes.
+
+    Right for **repair**: the suite is red, and green is the finish line. Wrong
+    for new behavior — if the check already passes, this goal is satisfied before
+    a single ant runs, and the colony stops having done nothing. Use
+    :func:`work_queue_goal` for that; the live run that found this reported
+    "satisfied after 0 rounds" on a perfectly healthy repo.
+    """
     return Goal(
         name=name,
         description=description,
         is_satisfied=lambda ctx: ctx.target.verify()[0],
     )
+
+
+def work_queue_goal(description: str, name: str = "delivery") -> Goal:
+    """A goal with no repo-level finish line: run until the work queue is empty.
+
+    For **new behavior**, where "the check passes" was already true before you
+    started and so says nothing about whether the job got done. The colony stops
+    on "no open work" (or its round/budget caps); each ant's own reward still
+    comes from the check re-run in its own worktree.
+    """
+    return Goal(name=name, description=description)
 
 
 def verification_critic() -> FunctionCritic:
@@ -619,6 +754,12 @@ def verification_critic() -> FunctionCritic:
     """
 
     def verify(outcome: Outcome, ctx: Any) -> Verdict:
+        # A run the gate held is a verdict about the *gate*, not about the brief.
+        # Learning "SingleAgentNarrow scores 0" from a DryRun would teach the
+        # policy to avoid a brief that was never allowed to try, and completing
+        # the task would mark undone work as done.
+        if not outcome.success and outcome.metrics.get("denied") and not outcome.metrics.get("changed_files"):
+            return Verdict(accepted=False, reason="held by the gate — no evidence about this brief")
         passed, output = ctx.target.verify()
         if outcome.success and not passed:
             return Verdict(accepted=False, reward=0.0,
@@ -642,20 +783,33 @@ def build_delivery_colony(
 ) -> Colony:
     """Wire the loop: one task, several competing briefs, verified after each try.
 
-    ``max_workers`` defaults to 1 for a real reason, not caution: parallel ants
-    would be parallel agents editing one working tree, and the diff we measure
-    could not be attributed to any of them. Fan out by giving each worker its own
-    checkout (a git worktree) before raising this.
+    ``max_workers > 1`` requires ``AgentWorkspace(isolate=True)`` and is refused
+    without it. That is not caution: parallel agents editing one working tree
+    produce interleaved diffs that cannot be attributed to the ant that made
+    them, so the swarm would learn from noise — a quieter, worse failure than a
+    crash. With isolation each ant gets its own git worktree, the main repo is
+    never written to, and the work comes back as ``target.patches``.
 
     Persist ``memory`` (a ``JsonStore``) to keep what the briefs earn across runs
     — an in-memory store makes every session start cold.
     """
+    if max_workers > 1 and not getattr(target, "isolate", False):
+        raise ValueError(
+            "max_workers > 1 needs AgentWorkspace(isolate=True): parallel agents "
+            "sharing one working tree make every result unattributable"
+        )
     tactics = tactics or [SingleAgentNarrow(), WriteTestFirst(), PlanThenPatch(), ReviewedSwarm()]
 
     def plan(goal, board, target):  # noqa: ANN001
         if board.tasks:
             return []
-        return [board.post_task(goal.description or f"pursue:{goal.name}")]
+        # One task per worker: with isolation these run as independent attempts at
+        # the same goal, and the policy picks a brief for each. Serial runs get a
+        # single task and retry it across rounds instead.
+        return [
+            board.post_task(goal.description or f"pursue:{goal.name}")
+            for _ in range(max_workers)
+        ]
 
     return Colony(
         target,

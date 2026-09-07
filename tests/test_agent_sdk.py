@@ -564,3 +564,217 @@ def test_the_last_result_wins_because_it_carries_the_call_total(monkeypatch):
     # running total for the whole call, so summing would double-count.
     run, _captured = _run_sdk_runner(monkeypatch, [_FakeResult(cost=0.1478), _FakeResult(cost=0.2178)])
     assert run.cost_usd == 0.2178
+
+
+# --- worktree fan-out --------------------------------------------------------
+#
+# These use real git repositories in temp dirs. Mocking git would only prove the
+# mock agrees with itself; the whole claim here is that two agents editing at the
+# same time cannot see each other, and only real worktrees can show that.
+
+import pathlib
+import subprocess
+
+
+def _git_repo(tmp_path) -> str:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, check=True)
+    run("init", "-q")
+    run("config", "user.email", "t@t")
+    run("config", "user.name", "t")
+    (repo / "seed.txt").write_text("seed\n")
+    run("add", "-A")
+    run("commit", "-qm", "seed")
+    return str(repo)
+
+
+def _writing_runner(filename="ant.txt"):
+    """A runner that writes into whichever workspace it is handed, if allowed."""
+
+    def runner(brief, spec, bridge, ws):
+        run = AgentRun(cost_usd=0.01)
+        allowed, _ = bridge.decide("Write", {"file_path": filename})
+        run.tools_used.append("Write")
+        if allowed:
+            # Content names the tree, so two ants' patches are distinguishable.
+            pathlib.Path(ws.path, filename).write_text(f"written in {pathlib.Path(ws.path).name}\n")
+        run.denied = list(bridge.denied)
+        return run
+
+    return runner
+
+
+def test_without_isolation_a_session_is_just_the_workspace(tmp_path):
+    ws = AgentWorkspace(_git_repo(tmp_path))
+    assert ws.session(None) is ws
+    ws.release(ws)  # a no-op, and must never delete the real tree
+    assert pathlib.Path(ws.path, "seed.txt").exists()
+
+
+def test_two_sessions_cannot_see_each_others_edits(tmp_path):
+    # The whole point of the fan-out.
+    ws = AgentWorkspace(_git_repo(tmp_path), isolate=True)
+    try:
+        a, b = ws.session(None), ws.session(None)
+        assert a.path != b.path != ws.path
+        pathlib.Path(a.path, "only_a.txt").write_text("a\n")
+        assert pathlib.Path(a.path, "only_a.txt").exists()
+        assert not pathlib.Path(b.path, "only_a.txt").exists()
+        assert not pathlib.Path(ws.path, "only_a.txt").exists()  # main tree untouched
+        assert pathlib.Path(b.path, "seed.txt").exists()  # but each is a real checkout
+    finally:
+        ws.cleanup()
+
+
+def test_release_lifts_the_work_out_as_a_patch_then_removes_the_worktree(tmp_path):
+    ws = AgentWorkspace(_git_repo(tmp_path), isolate=True)
+    try:
+        from tactics.colony.blackboard import Task
+
+        session = ws.session(Task(id="t7", description="d"))
+        pathlib.Path(session.path, "new.txt").write_text("hello\n")
+        ws.release(session)
+
+        assert not pathlib.Path(session.path).exists()  # worktree gone
+        assert len(ws.patches) == 1
+        patch = ws.patches[0]
+        assert patch.task == "t7"
+        assert "new.txt" in patch.text and "hello" in patch.text  # untracked files included
+    finally:
+        ws.cleanup()
+
+
+def test_a_session_that_changed_nothing_produces_no_patch(tmp_path):
+    ws = AgentWorkspace(_git_repo(tmp_path), isolate=True)
+    try:
+        ws.release(ws.session(None))
+        assert ws.patches == []
+    finally:
+        ws.cleanup()
+
+
+def test_a_patch_can_be_landed_on_the_main_repository(tmp_path):
+    ws = AgentWorkspace(_git_repo(tmp_path), isolate=True)
+    try:
+        session = ws.session(None)
+        pathlib.Path(session.path, "landed.txt").write_text("from the ant\n")
+        ws.release(session)
+
+        assert not pathlib.Path(ws.path, "landed.txt").exists()
+        ok, out = ws.apply_patch(ws.patches[0])
+        assert ok, out
+        assert pathlib.Path(ws.path, "landed.txt").read_text() == "from the ant\n"
+    finally:
+        ws.cleanup()
+
+
+def test_a_workspace_that_is_not_a_git_repo_fails_loudly(tmp_path):
+    # Silently sharing the main tree is the corruption isolation exists to stop,
+    # so a broken worktree must raise rather than fall back.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    ws = AgentWorkspace(str(plain), isolate=True)
+    try:
+        with __import__("pytest").raises(RuntimeError, match="worktree"):
+            ws.session(None)
+    finally:
+        ws.cleanup()
+
+
+def test_parallel_workers_are_refused_without_isolation(tmp_path):
+    ws = AgentWorkspace(_git_repo(tmp_path))
+    try:
+        build_delivery_colony(ws, max_workers=3)
+        raise AssertionError("should have refused")
+    except ValueError as exc:
+        assert "isolate=True" in str(exc)
+
+
+def test_a_parallel_colony_gives_each_ant_its_own_tree(tmp_path):
+    ws = AgentWorkspace(_git_repo(tmp_path), check=["test", "-f", "ant.txt"],
+                        runner=_writing_runner(), isolate=True)
+    try:
+        colony = build_delivery_colony(ws, gate=AutoApprove(), max_workers=3, max_rounds=1)
+        result = colony.run(delivery_goal("make the change"))
+
+        assert result.history[0].dispatched == 3           # three ants ran at once
+        assert len(ws.patches) == 3                        # each produced its own work
+        bodies = {p.text for p in ws.patches}
+        assert len(bodies) == 3                            # in three distinct trees
+        assert not pathlib.Path(ws.path, "ant.txt").exists()  # main repo never written
+        assert ws.changed_files() == []
+    finally:
+        ws.cleanup()
+
+
+def test_a_parallel_dry_run_writes_nothing_anywhere(tmp_path):
+    ws = AgentWorkspace(_git_repo(tmp_path), check=["test", "-f", "ant.txt"],
+                        runner=_writing_runner(), isolate=True)
+    try:
+        colony = build_delivery_colony(ws, gate=DryRun(), max_workers=2, max_rounds=1)
+        colony.run(delivery_goal("make the change"))
+        assert ws.patches == []
+        assert ws.changed_files() == []
+    finally:
+        ws.cleanup()
+
+
+def test_cleanup_removes_every_worktree_it_created(tmp_path):
+    ws = AgentWorkspace(_git_repo(tmp_path), isolate=True)
+    sessions = [ws.session(None) for _ in range(3)]
+    root = pathlib.Path(sessions[0].path).parent
+    ws.cleanup()
+    assert not root.exists()
+    code, out = ws.run(["git", "worktree", "list"])
+    assert code == 0 and out.strip().count("\n") == 0  # only the main tree remains
+
+
+def test_delivery_goal_is_for_repair_and_is_satisfied_by_a_green_check():
+    agent = ScriptedAgent()
+    ctx = _ctx(_workspace(agent))
+    assert ctx.goal.satisfied_by(ctx) is False
+    agent.edited = True
+    assert ctx.goal.satisfied_by(ctx) is True
+
+
+def test_work_queue_goal_does_not_declare_victory_before_any_ant_runs():
+    # Found live: on a repo whose suite already passes, a check-based goal is
+    # satisfied at round 0 and the colony stops having done nothing.
+    from tactics.playbooks.agent_sdk import work_queue_goal
+
+    agent = ScriptedAgent()
+    agent.edited = True  # check is already green
+    ctx = _ctx(_workspace(agent))
+    ctx.goal = work_queue_goal("add a new method")
+    assert ctx.goal.satisfied_by(ctx) is False
+
+
+def test_the_journal_entry_says_what_the_run_actually_changed():
+    # Found live: the entry was written before the measurement, so every run
+    # reported files=None — an audit trail of intent, not of effect.
+    journal = Journal()
+    SingleAgentNarrow().execute(_ctx(_workspace(ScriptedAgent()), journal=journal))
+    entry = next(e for e in journal.events if e.kind == "agent.run")
+    assert entry.data["changed_files"] == 1
+
+
+def test_a_gate_held_run_teaches_the_policy_nothing_about_the_brief():
+    # Found live: a parallel DryRun reported "2 tasks done" and learned a 0 for
+    # the brief — but the brief was never allowed to try.
+    from tactics.core.outcome import Outcome
+
+    ctx = _ctx(_workspace(ScriptedAgent()))
+    held = Outcome(success=False, reward=0.0, metrics={"denied": 4, "changed_files": 0})
+    verdict = verification_critic().verify(held, ctx)
+    assert verdict.accepted is False
+    assert "held by the gate" in verdict.reason
+
+
+def test_a_real_failure_is_still_learned_from():
+    from tactics.core.outcome import Outcome
+
+    agent = ScriptedAgent(check_after_edit=False)
+    ctx = _ctx(_workspace(agent))
+    tried = Outcome(success=False, reward=0.0, metrics={"denied": 0, "changed_files": 2})
+    assert verification_critic().verify(tried, ctx).accepted is True
