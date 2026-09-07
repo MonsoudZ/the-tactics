@@ -107,6 +107,33 @@ Rules: the scribe records only specific, actionable, evidence-backed insights �
 an empty list is a valid answer. Relevance is playbook/goal match + keyword
 overlap + recency; keep lesson text short and concrete so matching works.
 
+### The execution layer (v0.6) — the Agent SDK as a Target (`playbooks/agent_sdk.py`)
+
+The **Claude Agent SDK** (`pip install claude-agent-sdk`) is Claude Code as a
+library: tool loop, built-in Read/Write/Edit/Bash/Grep, subagents, context
+compaction, permissions. It is the execution layer, and it is not worth
+rebuilding. What it has no opinion about is which brief to send, whether to
+believe the result, what the run cost, or what last week taught it — which is
+precisely this framework. So don't compete with the harness; govern it.
+
+| Seam | What joins | Why it matters |
+|------|-----------|----------------|
+| `AgentWorkspace(Target)` | `run_agent()` does the work; `verify()` measures it | Two separate methods on purpose — reward is measured, never self-reported. `runner` is injectable, so all 24 tests run with no SDK, key, or network. |
+| `BriefTactic` | a brief *is* a tactic (system prompt + tool allowlist + subagent roster) | Brief shapes compete and the policy learns which wins where. `SingleAgentNarrow` · `WriteTestFirst` · `PlanThenPatch` · `ReviewedSwarm`. |
+| `GateBridge` | `ctx.gate` → the SDK's `can_use_tool` callback | Every write, Bash command, and unknown tool is classified and decided by *our* gate and lands in *our* journal. `DryRun` = a colony that cannot write a byte. |
+| `Outcome.cost` | `ResultMessage.total_cost_usd` | `Budget(max_cost=5.00)` is a real dollar ceiling on an autonomous swarm. |
+
+Rules: `classify_tool_call` is **fail-closed** — an unclassified tool is
+irreversible + high risk, so a `PolicyGate` escalates it. Cost comes from
+`total_cost_usd`, never from summing assistant `usage`: with subagents `usage`
+counts only the top-level loop, so `ReviewedSwarm` would look artificially cheap
+and the Budget would under-count the tactic most able to run away with the bill.
+Reward is 1.0 only when the check passes *and* the diff is non-empty — a
+confident summary over an empty diff is the exact failure this guards. Efficiency
+lives on `cost`, not `reward`. `max_workers=1` is the default because parallel
+ants would be parallel agents editing one working tree; give each its own git
+worktree before raising it.
+
 ## How to add a new domain (a "playbook")
 
 This is the path for focumate, trading, lead-finder, gift-cards. Always the same:
@@ -143,11 +170,13 @@ Copy `examples/lead_finder_demo.py` as the canonical shape.
 ```bash
 python3 -m pip install -e .            # install (editable)
 python3 -m pip install -e '.[llm]'     # install with the Claude-backed LLM layer
+python3 -m pip install -e '.[agent-sdk]'  # install with the Claude Agent SDK execution layer
 python3 -m pytest                      # run tests (keep green)
 python3 examples/lead_finder_demo.py   # see the single loop learn
 python3 examples/swarm_demo.py         # see the colony swarm, verify, reinforce
 python3 examples/safety_demo.py        # see budgets, the approval gate, the journal
 python3 examples/llm_demo.py           # LLM tactics + LLM critic (offline, scripted)
+python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code agent (offline)
 ```
 
 ## Known limitations (audited, accepted for now)
@@ -160,6 +189,12 @@ python3 examples/llm_demo.py           # LLM tactics + LLM critic (offline, scri
 - **`ScriptedClient` isn't thread-safe** (its response index races). It's a
   test/demo helper — run LLM colony demos with `max_workers=1`. `ClaudeClient`
   (the production path) is fine in parallel.
+- **`agent_sdk._sdk_runner` has never run against a live SDK.** Every test uses the
+  injected `runner`, so the decision logic is proven and the *adapter* is not. Its
+  message-shape reads are defensive (`getattr`, optional cost fields) and it
+  filters options to the fields the installed `ClaudeAgentOptions` declares, so a
+  version skew drops an option rather than raising — but the first real run should
+  be a `DryRun` against a scratch repo, and check that `cost_usd` is non-zero.
 - **The single `Agent` loop isolates tactic errors but not `observe()`/goal-predicate
   errors.** The `Colony` (the production path) isolates everything. Keep `Target.observe`
   and `Goal.is_satisfied` total/non-throwing.
@@ -180,6 +215,10 @@ python3 examples/llm_demo.py           # LLM tactics + LLM critic (offline, scri
       when it's in session scope. Next: gated fix tactics + front/back contract check.
 - [x] Playbook: repo-health — audit any repo (tests/lint/secrets) via shell-out
       (`playbooks/repo_health.py`); the reusable base the focumate audits build on.
+- [x] Playbook: agent-sdk — the Claude Agent SDK as a governed Target: competing
+      briefs, `can_use_tool` → approval gate, dollar-denominated Budget, verified
+      reward (`playbooks/agent_sdk.py`). Next: git-worktree fan-out so briefs can
+      run in parallel, and `JsonStore` + `Scribe` wired in so briefs compound.
 - [ ] Playbook: trading — alerts, shift/buy/sell against a goal.
 - [x] Playbook: lead-finder — score bad sites, draft + send outreach (`playbooks/lead_finder.py`, dry-run by default).
 - [ ] Playbook: gift-cards — production-readiness checks.
