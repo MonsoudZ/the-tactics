@@ -311,14 +311,36 @@ python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code a
   cost within 3%, Fisher p = 1.0 on every outcome.
 
   Read it carefully, though: this lesson advised installing a package that
-  *cannot* be installed here, so an agent ignoring it may simply be right. The
-  result is about one non-actionable lesson, not about lesson injection. And
-  0/10 has a 95% upper bound near 0.28, so an effect up to ~28% would hide. The
-  experiment that would actually settle the mechanism's worth needs a task
-  agents fail at roughly half the time unaided, and a lesson that names the step
-  they miss — measured on reward, not on behaviour. That one has not been run.
-  One incidental finding worth keeping: across 20 trials under a check-based
-  reward, nothing ever deleted the failing test to go green.
+  *cannot* be installed here, so an agent ignoring it may simply be right.
+
+  **The calibrated version was then built and run: 60 trials, three arms.** The
+  repo (a module-level registry that leaks between tests, where the obvious fix
+  breaks a second test) sits at a 60% unaided pass rate with `max_turns=5` — the
+  headroom the earlier repos lacked. Arms: no lesson, the scribe's own lessons,
+  and a hand-written mechanism lesson as an upper bound. n=20 each.
+
+  | arm | passed | ran out of turns | mean $ |
+  |-----|--------|------------------|--------|
+  | no lesson | 12/20 | 1/20 | 0.051 |
+  | scribe's lessons | 15/20 | 0/20 | 0.066 |
+  | hand-written mechanism lesson | 8/20 | **9/20** | 0.048 |
+
+  On the question asked — do lessons improve outcomes — the answer is still no
+  evidence either way: +15pp for the scribe's lessons at p=0.50, −20pp for the
+  hand-written one at p=0.34. Detecting a 15pp difference here needs roughly
+  n=150 per arm; n=20 cannot see it, and batch-to-batch swings were large (the
+  upper-bound arm went 2/10 then 6/10).
+
+  What *did* come out significant is worth more than the null: **a more detailed
+  lesson can cost you the run.** The prescriptive mechanism lesson sent agents
+  into investigation they could not finish, exhausting the turn budget with
+  nothing written in 9/20 runs against 1/20 without it (p=0.008) and 0/20 with
+  the scribe's shorter ones (p=0.001). Lesson length trades against the turn
+  budget, and the naive assumption — better lesson, better outcome — is the one
+  the data actually contradicts.
+
+  One incidental finding across all 80 trials in this playbook: under a
+  check-based reward, nothing ever deleted a failing test to go green.
 
   Patch selection is live too (3 candidates from 3 briefs, all re-verified,
   smallest landed, suite green on the result; a real LLM judge returning a

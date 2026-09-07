@@ -1312,3 +1312,50 @@ def test_the_verdict_reason_distinguishes_a_fix_from_a_reproduced_failure():
     passing = verification_critic().verify(
         Outcome(success=True, reward=1.0, metrics={"changed_files": 2}), ctx)
     assert "confirms the fix" in passing.reason
+
+
+def test_a_run_that_errored_is_still_measured_not_assumed_failed():
+    # A turn limit or a dropped connection does not undo the work already done.
+    # Scoring it 0 without looking is the same self-report this playbook refuses
+    # to trust, just inverted.
+    class ErrorsAfterWorking(ScriptedAgent):
+        def runner(self, brief, spec, bridge, ws):
+            run = super().runner(brief, spec, bridge, ws)
+            run.error = "ResultError('Reached maximum number of turns')"
+            return run
+
+    agent = ErrorsAfterWorking()
+    out = SingleAgentNarrow().execute(_ctx(_workspace(agent)))
+    assert out.success and out.reward == 1.0     # the check is what decides
+    assert "also errored" in out.notes           # and the error is still on the record
+
+
+def test_an_errored_run_that_did_nothing_is_still_a_loss():
+    agent = ScriptedAgent(error="RuntimeError('boom')")
+    out = SingleAgentNarrow().execute(_ctx(_workspace(agent)))
+    assert out.success is False
+    assert "no work done" in out.notes
+
+
+def test_the_journal_says_how_many_lessons_reached_the_brief():
+    # A store that is wired but empty looks exactly like a store with nothing
+    # relevant to say. Three separate misreadings came from not being able to
+    # tell those apart — including a 30-trial experiment that measured nothing.
+    store = InMemoryLessons()
+    store.add(Lesson(text="a thing we learned", playbook="agent_sdk"))
+    journal = Journal()
+    SingleAgentNarrow(lessons=store).execute(_ctx(_workspace(ScriptedAgent()), journal=journal))
+    assert next(e for e in journal.events if e.kind == "lessons.recalled").data["count"] == 1
+
+
+def test_an_empty_store_is_visibly_empty_rather_than_silent():
+    journal = Journal()
+    SingleAgentNarrow(lessons=InMemoryLessons()).execute(
+        _ctx(_workspace(ScriptedAgent()), journal=journal))
+    assert next(e for e in journal.events if e.kind == "lessons.recalled").data["count"] == 0
+
+
+def test_no_store_records_nothing_at_all():
+    journal = Journal()
+    SingleAgentNarrow().execute(_ctx(_workspace(ScriptedAgent()), journal=journal))
+    assert not [e for e in journal.events if e.kind == "lessons.recalled"]

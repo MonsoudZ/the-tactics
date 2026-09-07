@@ -697,15 +697,20 @@ class BriefTactic(Tactic):
         """
         if self.lessons is None:
             return brief
-        block = render_lessons(
-            self.lessons.relevant(
-                playbook=getattr(ctx.target, "name", None),
-                goal=getattr(ctx.goal, "name", None) if ctx.goal else None,
-                query=brief,
-                limit=self.lesson_limit,
-            ),
-            header="What past runs on this repository learned:",
+        relevant = self.lessons.relevant(
+            playbook=getattr(ctx.target, "name", None),
+            goal=getattr(ctx.goal, "name", None) if ctx.goal else None,
+            query=brief,
+            limit=self.lesson_limit,
         )
+        journal = getattr(ctx, "journal", None)
+        if journal is not None:
+            # How many lessons actually reached the brief. A store that is wired
+            # but empty — a wrong path, a wiped directory, a store that was never
+            # populated — is otherwise indistinguishable from having nothing to
+            # say, and produces a run that looks like evidence and is not.
+            journal.record("lessons.recalled", tactic=self.name, count=len(relevant))
+        block = render_lessons(relevant, header="What past runs on this repository learned:")
         return f"{block}\n\n{brief}" if block else brief
 
     def execute(self, ctx: Any) -> Outcome:
@@ -731,20 +736,21 @@ class BriefTactic(Tactic):
 
         journal = getattr(ctx, "journal", None)
 
-        if run.error:
-            if journal is not None:
-                journal.record("agent.run", tactic=self.name, **metrics)
-            return Outcome(success=False, reward=0.0, cost=cost, metrics=metrics,
-                           notes=f"agent run failed: {run.error[:200]}")
-
-        # Measured against the baseline, not against absolute dirtiness.
+        # Measure first, and unconditionally. A run that errored — a turn limit,
+        # a dropped connection — may still have done the work, and scoring it 0
+        # without looking is exactly the self-report this playbook refuses to
+        # trust, only inverted. The error is context for the notes; the tree and
+        # the check decide the reward.
         changed = sorted(set(ctx.target.changed_files()) - before_files)
         metrics["changed_files"] = len(changed)
-        # Journalled after the measurement, so the audit trail carries what the
-        # run actually did rather than only what it was asked to do.
         if journal is not None:
-            journal.record("agent.run", tactic=self.name, **metrics)
+            journal.record("agent.run", tactic=self.name, **metrics, error=run.error[:120])
+        aside = f" (the run also errored: {run.error[:120]})" if run.error else ""
+
         if ctx.target.snapshot() == before_snapshot:
+            if run.error:
+                return Outcome(success=False, reward=0.0, cost=cost, metrics=metrics,
+                               notes=f"agent run failed with no work done: {run.error[:200]}")
             held = f" ({len(run.denied)} tool call(s) held by the gate)" if run.denied else ""
             return Outcome(success=False, reward=0.0, cost=cost, metrics=metrics,
                            notes=f"agent left the working tree untouched{held}")
@@ -762,9 +768,8 @@ class BriefTactic(Tactic):
             reward=1.0 if passed else 0.0,
             cost=cost,
             metrics=metrics,
-            notes=f"check passed, {len(changed)} file(s) changed"
-            if passed
-            else f"check failed: {output.strip()[-300:]}",
+            notes=(f"check passed, {len(changed)} file(s) changed{aside}"
+                   if passed else f"check failed: {output.strip()[-300:]}{aside}"),
         )
 
 
