@@ -298,16 +298,27 @@ python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code a
   briefs without addressing it wastes rounds. The conservatism was never the
   problem — it had been shown a tally, never a failure.
 
-  **Recall is verified live; efficacy is not.** A fresh process on that repo
-  loads both halves off disk (2 lessons, 3 briefs' stats) and the brief the real
-  agent receives *opens* with "What past runs on this repository learned:",
-  naming the recurring `ModuleNotFoundError` — deterministic, and confirmed on
-  every run since. Whether the lesson *changes what the agent does* is a
-  different claim and is unmeasured: across two recall runs, one additionally
-  wrote a `requirements.txt` (what the lesson advises) and one did not. n=2 with
-  no control is not evidence. Settling it means the experiment the framework is
-  built for — same repo, same brief, with and without the lesson, enough trials
-  to separate the effect from run-to-run variance — and nobody has run it.
+  **Recall works. This lesson changed nothing — measured, 20 trials.** A fresh
+  process loads both halves off disk and the brief the real agent receives opens
+  with "What past runs on this repository learned:", naming the recurring
+  `ModuleNotFoundError`. That is deterministic. Whether it *changes what the
+  agent does* was then run properly: same repo, same brief, same tactic, 10
+  trials per arm, the only difference being whether the store was wired in
+  (verified: 968-char brief vs 24-char). Result — declared the dependency 0/10
+  vs 0/10; attempted an install 0/10 vs 1/10, and that one was `pip show`, an
+  inspection; deleted the failing test 0/10 vs 0/10. File-level behaviour was
+  identical in 20/20 (`pytest.ini`-or-`pyproject.toml` plus the `calc.py` fix),
+  cost within 3%, Fisher p = 1.0 on every outcome.
+
+  Read it carefully, though: this lesson advised installing a package that
+  *cannot* be installed here, so an agent ignoring it may simply be right. The
+  result is about one non-actionable lesson, not about lesson injection. And
+  0/10 has a 95% upper bound near 0.28, so an effect up to ~28% would hide. The
+  experiment that would actually settle the mechanism's worth needs a task
+  agents fail at roughly half the time unaided, and a lesson that names the step
+  they miss — measured on reward, not on behaviour. That one has not been run.
+  One incidental finding worth keeping: across 20 trials under a check-based
+  reward, nothing ever deleted the failing test to go green.
 
   Patch selection is live too (3 candidates from 3 briefs, all re-verified,
   smallest landed, suite green on the result; a real LLM judge returning a
