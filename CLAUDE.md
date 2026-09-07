@@ -298,6 +298,17 @@ python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code a
   briefs without addressing it wastes rounds. The conservatism was never the
   problem — it had been shown a tally, never a failure.
 
+  **Recall is verified live; efficacy is not.** A fresh process on that repo
+  loads both halves off disk (2 lessons, 3 briefs' stats) and the brief the real
+  agent receives *opens* with "What past runs on this repository learned:",
+  naming the recurring `ModuleNotFoundError` — deterministic, and confirmed on
+  every run since. Whether the lesson *changes what the agent does* is a
+  different claim and is unmeasured: across two recall runs, one additionally
+  wrote a `requirements.txt` (what the lesson advises) and one did not. n=2 with
+  no control is not evidence. Settling it means the experiment the framework is
+  built for — same repo, same brief, with and without the lesson, enough trials
+  to separate the effect from run-to-run variance — and nobody has run it.
+
   Patch selection is live too (3 candidates from 3 briefs, all re-verified,
   smallest landed, suite green on the result; a real LLM judge returning a
   reasoned choice, and the fail-closed fallback firing for real when the judge
