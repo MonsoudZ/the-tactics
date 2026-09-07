@@ -34,6 +34,7 @@ Supporting cast: `Context` (the per-step snapshot handed to tactics), `Memory`
 | Concern | File | What it does | Strategies |
 |---------|------|--------------|------------|
 | **Generalization across situations** | `core/estimator.py` | How a tactic's value *here* is judged. The policy asks the `Estimator`, so generalization is a swap, not a rewrite. | `ExactEstimator` (default; identical situations only) · `SimilarityEstimator` (borrows from *similar* situations via a domain-free feature kernel) |
+| **Parallel exploration** | `core/policy.py` | Whether the ants of one round try *different* tactics. The policy is asked once per ant against one memory snapshot, so by default they all agree. | `WithoutReplacement(inner)` hides what a round already handed out, so a 3-ant round samples 3 tactics instead of one three times (`begin_round` scopes it; the Colony calls it) |
 | **Delayed credit assignment** | `core/credit.py` | Spreads a reward back over the moves that earned it. Controls *when* memory is written. | `ImmediateCredit` (default; online) · `DiscountedReturn(gamma)` (Monte-Carlo return across episodes) |
 
 Each `Agent.pursue` call is one episode. Use `DiscountedReturn` when reward is
@@ -147,9 +148,14 @@ Reward is 1.0 only when the check passes *and* the diff is non-empty — a
 confident summary over an empty diff is the exact failure this guards. Efficiency
 lives on `cost`, not `reward`.
 
-**Fan-out (verified live: 3 agents, 48s, 3 patches, main repo untouched).** Set
-`AgentWorkspace(isolate=True)` and `max_workers > 1`; the unsafe combination is
-refused, not warned about. Each ant gets a detached worktree at HEAD, verifies in
+**Fan-out (verified live: 3 agents, 62s, 3 *distinct* patches, main repo
+untouched).** Set `AgentWorkspace(isolate=True)` and `max_workers > 1`; the
+unsafe combination is refused, not warned about. `spread=True` (the default)
+wraps the policy in `WithoutReplacement` so the round's ants try different
+briefs — without it they all reach the same conclusion from the same memory
+snapshot, and you buy throughput without information exactly when the briefs are
+what you're comparing. Turn it off to spend a parallel round reducing variance on
+the current best instead. Each ant gets a detached worktree at HEAD, verifies in
 its *own* tree (so reward is attributable), and its work is lifted out as a
 `Patch` before the worktree is destroyed. Landing one is a separate deliberate
 act (`apply_patch`, `--3way`). Two consequences to know: the check runs *inside*
@@ -259,13 +265,9 @@ python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code a
   three more (a check-based goal satisfied at round 0, the journal entry written
   before the measurement, gate-held runs polluting a brief's statistics).
   Compounding is live too (`persist=True` across two processes; lessons reaching
-  a real agent's brief). Still unexercised: `max_turns`, and `max_workers` above 3.
-- **All parallel ants in a round pick the same brief.** The policy is consulted
-  once per ant against the same memory snapshot, so a 3-ant round produces three
-  samples of one brief rather than one sample each of three — exactly when you
-  most want the comparison. Fan-out still pays for throughput; it does not yet
-  pay for exploration. Fixing it means sampling without replacement (or an
-  optimistic in-round update) in the policy layer.
+  a real agent's brief), and so is per-round spread (3 ants, 3 different briefs,
+  3 distinct patches, against memory that favoured one of them).
+  Still unexercised: `max_turns`, and `max_workers` above 3.
 - **The scribe has written nothing in five live runs.** The path is wired and
   works (proven offline with a scripted client): it builds the prompt, the model
   returns well-formed `{"lessons": []}`, and it correctly records nothing. But
@@ -296,9 +298,9 @@ python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code a
 - [x] Playbook: agent-sdk — the Claude Agent SDK as a governed Target: competing
       briefs, PreToolUse hook → approval gate, dollar-denominated Budget, verified
       reward, git-worktree fan-out for parallel ants (`playbooks/agent_sdk.py`).
-      `persist=True` compounds both halves of memory across runs. Next: a tactic
-      that picks among captured patches instead of applying by hand, and per-round
-      exploration so parallel ants try *different* briefs.
+      `persist=True` compounds both halves of memory across runs, and parallel
+      rounds spread across briefs. Next: a tactic that picks among the captured
+      patches instead of applying one by hand.
 - [ ] Playbook: trading — alerts, shift/buy/sell against a goal.
 - [x] Playbook: lead-finder — score bad sites, draft + send outreach (`playbooks/lead_finder.py`, dry-run by default).
 - [ ] Playbook: gift-cards — production-readiness checks.

@@ -199,6 +199,9 @@ class Colony:
                 break
 
             self.journal.record("round", index=rnd, dispatched=len(batch))
+            # Lets a coordinating policy spread this batch across tactics instead
+            # of every ant independently reaching the same conclusion.
+            self.policy.begin_round()
             ant_results = self._run_batch(batch, goal)
 
             accepted = rejected = errored = 0

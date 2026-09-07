@@ -226,3 +226,124 @@ def test_learning_carries_across_runs_via_shared_memory():
     for sig, table in memory.snapshot().items():
         if "good" in table and "bad" in table:
             assert table["good"]["total_reward"] >= table["bad"]["total_reward"]
+
+
+# --- WithoutReplacement: spreading a parallel round across tactics ------------
+
+
+def _tactics(*names):
+    from tactics import FunctionTactic, Outcome
+
+    return [FunctionTactic(n, lambda ctx: Outcome.win(1.0)) for n in names]
+
+
+def _policy_ctx():
+    from tactics import Context, Goal, Target
+
+    class Nothing(Target):
+        name = "nothing"
+
+        def observe(self) -> dict:
+            return {}
+
+    return Context(target=Nothing(), goal=Goal(name="g"))
+
+
+def test_an_unwrapped_policy_gives_every_ant_the_same_tactic():
+    # The bug WithoutReplacement exists to fix, pinned so it can't come back
+    # silently: one memory snapshot, one conclusion, N times over.
+    from tactics import InMemoryStore, UCBPolicy
+
+    policy, ctx, memory = UCBPolicy(), _policy_ctx(), InMemoryStore()
+    tactics = _tactics("a", "b", "c")
+    for t in tactics:  # give every tactic a record so UCB stops exploring
+        memory.record(t.name, ctx.signature(), reward=1.0 if t.name == "b" else 0.0, success=True)
+    assert len({policy.choose(tactics, ctx, memory).name for _ in range(3)}) == 1
+
+
+def test_a_parallel_round_spreads_across_tactics():
+    from tactics import InMemoryStore, UCBPolicy, WithoutReplacement
+
+    policy = WithoutReplacement(UCBPolicy())
+    ctx, memory = _policy_ctx(), InMemoryStore()
+    tactics = _tactics("a", "b", "c", "d")
+    policy.begin_round()
+    picks = [policy.choose(tactics, ctx, memory).name for _ in range(3)]
+    assert len(set(picks)) == 3
+
+
+def test_the_next_round_starts_the_slate_clean():
+    from tactics import InMemoryStore, UCBPolicy, WithoutReplacement
+
+    policy = WithoutReplacement(UCBPolicy())
+    ctx, memory = _policy_ctx(), InMemoryStore()
+    tactics = _tactics("a", "b")
+    policy.begin_round()
+    first = [policy.choose(tactics, ctx, memory).name for _ in range(2)]
+    policy.begin_round()
+    second = [policy.choose(tactics, ctx, memory).name for _ in range(2)]
+    assert sorted(first) == sorted(second) == ["a", "b"]
+
+
+def test_more_ants_than_tactics_share_out_evenly():
+    # Six ants over three tactics should come out two apiece, not four piled on
+    # the winner and one each on the rest.
+    from collections import Counter
+
+    from tactics import InMemoryStore, UCBPolicy, WithoutReplacement
+
+    policy = WithoutReplacement(UCBPolicy())
+    ctx, memory = _policy_ctx(), InMemoryStore()
+    tactics = _tactics("a", "b", "c")
+    policy.begin_round()
+    counts = Counter(policy.choose(tactics, ctx, memory).name for _ in range(6))
+    assert set(counts.values()) == {2}
+
+
+def test_the_wrapped_policy_still_picks_the_best_of_what_is_left():
+    # Spreading must not become "ignore what we know" — the first ant still gets
+    # the winner; the others get the best of the rest.
+    from tactics import InMemoryStore, UCBPolicy, WithoutReplacement
+
+    ctx, memory = _policy_ctx(), InMemoryStore()
+    tactics = _tactics("poor", "great", "ok")
+    for name, reward in (("poor", 0.0), ("great", 1.0), ("ok", 0.5)):
+        for _ in range(4):
+            memory.record(name, ctx.signature(), reward=reward, success=reward > 0.4)
+
+    policy = WithoutReplacement(UCBPolicy(c=0.0))  # pure exploitation, to read the order
+    policy.begin_round()
+    assert [policy.choose(tactics, ctx, memory).name for _ in range(3)] == ["great", "ok", "poor"]
+
+
+def test_concurrent_ants_never_collide():
+    import threading
+
+    from tactics import InMemoryStore, UCBPolicy, WithoutReplacement
+
+    policy = WithoutReplacement(UCBPolicy())
+    ctx, memory = _policy_ctx(), InMemoryStore()
+    tactics = _tactics("a", "b", "c", "d", "e", "f", "g", "h")
+    policy.begin_round()
+
+    picks, lock, ready = [], threading.Lock(), threading.Barrier(8)
+
+    def pick():
+        ready.wait()  # maximize the overlap on the read-choose-mark window
+        chosen = policy.choose(tactics, ctx, memory)
+        with lock:
+            picks.append(chosen.name)
+
+    threads = [threading.Thread(target=pick) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(set(picks)) == 8
+
+
+def test_begin_round_is_a_no_op_on_a_plain_policy():
+    from tactics import EpsilonGreedyPolicy, UCBPolicy
+
+    UCBPolicy().begin_round()
+    EpsilonGreedyPolicy().begin_round()

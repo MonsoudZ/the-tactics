@@ -55,7 +55,7 @@ from .core.memory import (
     TacticStats,
 )
 from .core.outcome import Outcome
-from .core.policy import EpsilonGreedyPolicy, Policy, UCBPolicy
+from .core.policy import EpsilonGreedyPolicy, Policy, UCBPolicy, WithoutReplacement
 from .core.tactic import FunctionTactic, Tactic
 from .core.target import Target
 
@@ -103,6 +103,7 @@ __all__ = [
     "Target",
     "TrajectoryStep",
     "UCBPolicy",
+    "WithoutReplacement",
     "feature_similarity",
 ]
 

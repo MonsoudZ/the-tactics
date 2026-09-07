@@ -104,8 +104,10 @@ def fan_out() -> None:
     ws = AgentWorkspace(root, check=["test", "-f", "work.txt"], runner=runner, isolate=True)
     try:
         colony = build_delivery_colony(ws, gate=AutoApprove(), max_workers=3, max_rounds=1)
-        colony.run(work_queue_goal("do the work"))
+        result = colony.run(work_queue_goal("do the work"))
+        briefs = [e.data["tactic"] for e in result.journal.events if e.kind == "agent.run"]
         print("\n=== Fan-out — 3 ants, 3 worktrees, 1 repo ===")
+        print(f"  briefs tried     : {briefs}   <- three different ones, one round")
         print(f"  patches captured : {len(ws.patches)} ({len({p.text for p in ws.patches})} distinct)")
         print(f"  main repo dirty  : {ws.changed_files()}   <- never written to")
         ok, _ = ws.apply_patch(ws.patches[0])

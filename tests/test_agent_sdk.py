@@ -950,3 +950,51 @@ def test_an_untried_brief_is_explored_before_a_proven_one_is_exploited(tmp_path)
 
     colony = build_delivery_colony(ws, persist=repo, gate=AutoApprove())
     assert colony.policy.choose(colony.tactics, ctx, colony.memory).name != "PlanThenPatch"
+
+
+# --- per-round brief exploration ---------------------------------------------
+
+
+def test_a_parallel_colony_spreads_its_ants_across_briefs(tmp_path):
+    # Found live: three parallel ants all picked WriteTestFirst, so a fan-out
+    # round bought three samples of one brief instead of one each of three.
+    ws = AgentWorkspace(_git_repo(tmp_path), check=["test", "-f", "ant.txt"],
+                        runner=_writing_runner(), isolate=True)
+    try:
+        colony = build_delivery_colony(ws, gate=AutoApprove(), max_workers=3, max_rounds=1)
+        result = colony.run(delivery_goal("do the work"))
+        briefs = [e.data["tactic"] for e in result.journal.events if e.kind == "agent.run"]
+        assert len(briefs) == 3
+        assert len(set(briefs)) == 3  # three different briefs, one round
+    finally:
+        ws.cleanup()
+
+
+def test_spreading_can_be_turned_off_to_resample_the_best_brief(tmp_path):
+    ws = AgentWorkspace(_git_repo(tmp_path), check=["test", "-f", "ant.txt"],
+                        runner=_writing_runner(), isolate=True)
+    try:
+        colony = build_delivery_colony(ws, gate=AutoApprove(), max_workers=3,
+                                       max_rounds=1, spread=False)
+        result = colony.run(delivery_goal("do the work"))
+        briefs = [e.data["tactic"] for e in result.journal.events if e.kind == "agent.run"]
+        assert len(set(briefs)) == 1
+    finally:
+        ws.cleanup()
+
+
+def test_a_serial_colony_is_left_alone():
+    # Nothing to spread across when one ant runs at a time.
+    from tactics import UCBPolicy
+
+    agent = ScriptedAgent()
+    colony = build_delivery_colony(_workspace(agent), gate=AutoApprove(), max_workers=1)
+    assert isinstance(colony.policy, UCBPolicy)
+
+
+def test_the_spread_wrapper_is_wired_in_for_parallel_rounds(tmp_path):
+    from tactics import WithoutReplacement
+
+    ws = AgentWorkspace(_git_repo(tmp_path), isolate=True)
+    colony = build_delivery_colony(ws, max_workers=2)
+    assert isinstance(colony.policy, WithoutReplacement)

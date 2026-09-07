@@ -62,6 +62,7 @@ from ..core.goal import Goal
 from ..core.lessons import JsonlLessons, LessonStore, render_lessons
 from ..core.memory import InMemoryStore, JsonStore, MemoryStore
 from ..core.outcome import Outcome
+from ..core.policy import Policy, UCBPolicy, WithoutReplacement
 from ..core.tactic import Tactic
 from ..core.target import Target
 from ..llm.scribe import Scribe
@@ -901,6 +902,8 @@ def build_delivery_colony(
     memory: MemoryStore | None = None,
     lessons: LessonStore | None = None,
     persist: bool | str = False,
+    policy: Policy | None = None,
+    spread: bool = True,
     gate: Any = None,
     budget: Any = None,
     max_rounds: int = 4,
@@ -914,6 +917,13 @@ def build_delivery_colony(
     them, so the swarm would learn from noise — a quieter, worse failure than a
     crash. With isolation each ant gets its own git worktree, the main repo is
     never written to, and the work comes back as ``target.patches``.
+
+    ``spread`` (on by default) makes the ants of a parallel round try *different*
+    briefs. Without it the policy is consulted once per ant against one memory
+    snapshot, so all three reach the same conclusion and a three-agent round buys
+    three samples of one brief instead of one each of three — throughput without
+    information, exactly when the briefs are what you're comparing. Turn it off
+    to spend a parallel round reducing variance on the current best instead.
 
     ``persist=True`` (or a directory path) keeps both halves of memory on disk
     under ``<repo>/.tactics/``: the numeric record of which brief wins where, and
@@ -930,6 +940,10 @@ def build_delivery_colony(
         root = persist if isinstance(persist, str) else getattr(target, "path", ".")
         memory = memory or brief_memory(root)
         lessons = lessons or brief_lessons(root)
+
+    policy = policy or UCBPolicy()
+    if spread and max_workers > 1:
+        policy = WithoutReplacement(policy)
 
     tactics = tactics or [
         SingleAgentNarrow(lessons=lessons),
@@ -954,6 +968,7 @@ def build_delivery_colony(
         tactics,
         FunctionPlanner(plan),
         memory=memory or InMemoryStore(),
+        policy=policy,
         critic=verification_critic(),
         gate=gate,
         budget=budget,
