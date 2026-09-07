@@ -998,3 +998,216 @@ def test_the_spread_wrapper_is_wired_in_for_parallel_rounds(tmp_path):
     ws = AgentWorkspace(_git_repo(tmp_path), isolate=True)
     colony = build_delivery_colony(ws, max_workers=2)
     assert isinstance(colony.policy, WithoutReplacement)
+
+
+# --- choosing among the patches a fan-out produced ---------------------------
+#
+# Real git repos again: the whole claim is that a candidate is re-measured
+# against the *current* HEAD, which a fake can only assert about itself.
+
+from tactics.playbooks.agent_sdk import ApplyBestPatch, Patch, land_best_patch
+
+
+def _patch_from(ws, writes: dict, *, task="t1", tactic="Brief"):
+    """Produce a real Patch by making `writes` in a throwaway worktree."""
+    session = ws.session(None)
+    session.task_id, session.produced_by = task, tactic
+    for name, body in writes.items():
+        pathlib.Path(session.path, name).write_text(body)
+    ws.release(session)
+    return ws.patches[-1]
+
+
+def _repo_with_check(tmp_path, check):
+    repo = _git_repo(tmp_path)
+    return AgentWorkspace(repo, check=check, isolate=True)
+
+
+def test_a_patch_is_re_verified_against_current_head(tmp_path):
+    ws = _repo_with_check(tmp_path, ["test", "-f", "good.txt"])
+    try:
+        good = _patch_from(ws, {"good.txt": "ok\n"}, tactic="Good")
+        assert ws.trial(good).ok
+    finally:
+        ws.cleanup()
+
+
+def test_a_patch_that_fails_the_check_is_rejected(tmp_path):
+    ws = _repo_with_check(tmp_path, ["test", "-f", "good.txt"])
+    try:
+        bad = _patch_from(ws, {"other.txt": "nope\n"}, tactic="Bad")
+        trial = ws.trial(bad)
+        assert trial.applies and not trial.passes and not trial.ok
+    finally:
+        ws.cleanup()
+
+
+def test_a_patch_that_no_longer_applies_is_rejected(tmp_path):
+    ws = _repo_with_check(tmp_path, ["true"])
+    try:
+        stale = _patch_from(ws, {"seed.txt": "rewritten by the ant\n"})
+        # HEAD moves underneath it, exactly as it would if another patch landed.
+        pathlib.Path(ws.path, "seed.txt").write_text("someone else got here first\n")
+        ws.run(["git", "commit", "-qam", "moved on"])
+        assert not ws.trial(stale).applies
+    finally:
+        ws.cleanup()
+
+
+def test_the_best_candidate_is_landed_and_the_rest_retired(tmp_path):
+    ws = _repo_with_check(tmp_path, ["test", "-f", "feature.txt"])
+    try:
+        _patch_from(ws, {"feature.txt": "a\n", "extra.txt": "noise\n"}, task="t1", tactic="Verbose")
+        _patch_from(ws, {"feature.txt": "b\n"}, task="t2", tactic="Tight")
+        assert len(ws.patches) == 2
+
+        outcome = land_best_patch(ws)
+        assert outcome.success and outcome.reward == 1.0
+        assert outcome.metrics["candidates"] == 2 and outcome.metrics["verified"] == 2
+        assert outcome.metrics["chose"] == "Tight"          # smallest verified diff
+        assert pathlib.Path(ws.path, "feature.txt").exists()
+        assert not pathlib.Path(ws.path, "extra.txt").exists()
+        assert [p.tactic for p in ws.landed] == ["Tight"]
+        assert [p.tactic for p in ws.discarded] == ["Verbose"]
+        assert ws.patches == []                              # nothing left to re-land
+    finally:
+        ws.cleanup()
+
+
+def test_a_failing_candidate_never_wins_however_small(tmp_path):
+    ws = _repo_with_check(tmp_path, ["test", "-f", "feature.txt"])
+    try:
+        _patch_from(ws, {"tiny.txt": "x\n"}, task="t1", tactic="TinyButWrong")
+        _patch_from(ws, {"feature.txt": "a\n", "more.txt": "b\n"}, task="t2", tactic="BigButRight")
+        outcome = land_best_patch(ws)
+        assert outcome.metrics["chose"] == "BigButRight"
+        assert outcome.metrics["verified"] == 1
+    finally:
+        ws.cleanup()
+
+
+def test_when_nothing_survives_nothing_is_landed(tmp_path):
+    ws = _repo_with_check(tmp_path, ["test", "-f", "never.txt"])
+    try:
+        _patch_from(ws, {"a.txt": "a\n"}, task="t1", tactic="One")
+        _patch_from(ws, {"b.txt": "b\n"}, task="t2", tactic="Two")
+        outcome = land_best_patch(ws)
+        assert outcome.success is False and outcome.reward == 0.0
+        assert "no candidate survived" in outcome.notes
+        assert ws.changed_files() == [] and ws.landed == []
+    finally:
+        ws.cleanup()
+
+
+def test_the_gate_can_hold_the_landing(tmp_path):
+    ws = _repo_with_check(tmp_path, ["test", "-f", "feature.txt"])
+    try:
+        _patch_from(ws, {"feature.txt": "a\n"}, tactic="Tight")
+        journal = Journal()
+        outcome = land_best_patch(ws, gate=DryRun(), journal=journal)
+        assert outcome.success is False
+        assert "the gate held it" in outcome.notes
+        assert ws.changed_files() == [] and ws.patches  # still available to land later
+        # The selection still ran, so DryRun leaves a review artifact.
+        held = next(e for e in journal.events if e.kind == "gate.hold")
+        assert "land patch from Tight" in held.data["action"]
+        assert [e for e in journal.events if e.kind == "patch.trial"]
+    finally:
+        ws.cleanup()
+
+
+def test_the_judge_breaks_a_tie_between_verified_candidates(tmp_path):
+    ws = _repo_with_check(tmp_path, ["test", "-f", "feature.txt"])
+    try:
+        _patch_from(ws, {"feature.txt": "a\n", "notes.md": "why\n"}, task="t1", tactic="Documented")
+        _patch_from(ws, {"feature.txt": "b\n"}, task="t2", tactic="Bare")
+        # Candidates reach the judge in ranked order, so 0 is the deterministic
+        # pick ("Bare", the smaller diff) and 1 is the one it must override to.
+        judge = ScriptedClient([_json.dumps({"choice": 1, "why": "it explains itself"})])
+        outcome = land_best_patch(ws, judge=judge)
+        assert outcome.metrics["chose"] == "Documented"
+        assert "it explains itself" in outcome.notes
+        assert outcome.cost > 0  # judgment is not free
+    finally:
+        ws.cleanup()
+
+
+def test_a_judge_that_names_an_unverified_candidate_is_ignored(tmp_path):
+    # The judge may re-order proven options. It may never be the proof.
+    ws = _repo_with_check(tmp_path, ["test", "-f", "feature.txt"])
+    try:
+        _patch_from(ws, {"feature.txt": "a\n", "x.txt": "x\n"}, task="t1", tactic="Bigger")
+        _patch_from(ws, {"feature.txt": "b\n"}, task="t2", tactic="Smaller")
+        judge = ScriptedClient([_json.dumps({"choice": 7, "why": "I like a third one"})])
+        outcome = land_best_patch(ws, judge=judge)
+        assert outcome.metrics["chose"] == "Smaller"  # the measured order stands
+        assert "not on the list" in outcome.notes
+    finally:
+        ws.cleanup()
+
+
+def test_an_unusable_judge_falls_back_to_the_measured_order(tmp_path):
+    ws = _repo_with_check(tmp_path, ["test", "-f", "feature.txt"])
+    try:
+        _patch_from(ws, {"feature.txt": "a\n", "x.txt": "x\n"}, task="t1", tactic="Big")
+        _patch_from(ws, {"feature.txt": "b\n"}, task="t2", tactic="Small")
+        outcome = land_best_patch(ws, judge=ScriptedClient(["not json at all"]))
+        assert outcome.success and outcome.metrics["chose"] == "Small"
+        assert "judge unusable" in outcome.notes
+    finally:
+        ws.cleanup()
+
+
+def test_the_tactic_stands_down_when_there_is_nothing_to_choose(tmp_path):
+    ws = AgentWorkspace(_git_repo(tmp_path))
+    ctx = _ctx(ws)
+    assert ApplyBestPatch().is_applicable(ctx) is False
+    assert land_best_patch(ws).notes == "no candidate patches to choose from"
+
+
+def test_a_patch_records_which_brief_wrote_it(tmp_path):
+    ws = _repo_with_check(tmp_path, ["true"])
+    try:
+        agent = ScriptedAgent()
+        session = ws.session(None)
+        session._runner = agent.runner
+        SingleAgentNarrow().execute(_ctx(session))
+        ws.release(session)
+        assert ws.patches == [] or ws.patches[-1].tactic == "SingleAgentNarrow"
+    finally:
+        ws.cleanup()
+
+
+def test_work_the_agent_staged_is_not_silently_dropped(tmp_path):
+    # `git add` through Bash is an ordinary thing for an agent to do, and plain
+    # `git diff` would show none of it — the patch came back empty and the ant's
+    # work vanished without a word.
+    ws = AgentWorkspace(_git_repo(tmp_path), check=["true"], isolate=True)
+    try:
+        session = ws.session(None)
+        session.produced_by = "Stager"
+        pathlib.Path(session.path, "staged.py").write_text("print('work')\n")
+        session.run(["git", "add", "staged.py"])
+        ws.release(session)
+
+        assert len(ws.patches) == 1
+        assert "staged.py" in ws.patches[0].text
+        assert ws.patches[0].files == ["staged.py"]
+    finally:
+        ws.cleanup()
+
+
+def test_a_staged_patch_still_lands_and_verifies(tmp_path):
+    ws = AgentWorkspace(_git_repo(tmp_path), check=["test", "-f", "staged.py"], isolate=True)
+    try:
+        session = ws.session(None)
+        session.produced_by = "Stager"
+        pathlib.Path(session.path, "staged.py").write_text("print('work')\n")
+        session.run(["git", "add", "staged.py"])
+        ws.release(session)
+
+        outcome = land_best_patch(ws)
+        assert outcome.success and outcome.metrics["chose"] == "Stager"
+        assert pathlib.Path(ws.path, "staged.py").exists()
+    finally:
+        ws.cleanup()

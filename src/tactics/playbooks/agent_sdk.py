@@ -58,6 +58,7 @@ from typing import Any, Callable
 
 from ..colony import Colony, FunctionCritic, FunctionPlanner, Verdict
 from ..core.approval import Proposal
+from ..core.context import Context
 from ..core.goal import Goal
 from ..core.lessons import JsonlLessons, LessonStore, render_lessons
 from ..core.memory import InMemoryStore, JsonStore, MemoryStore
@@ -65,6 +66,7 @@ from ..core.outcome import Outcome
 from ..core.policy import Policy, UCBPolicy, WithoutReplacement
 from ..core.tactic import Tactic
 from ..core.target import Target
+from ..llm.client import extract_json
 from ..llm.scribe import Scribe
 
 # Where a repo's accumulated experience lives. Numeric memory (which brief wins
@@ -298,6 +300,19 @@ class Patch:
 
 
 @dataclass
+class PatchTrial:
+    """What happened when a candidate patch met a clean checkout of HEAD."""
+
+    applies: bool
+    passes: bool
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.applies and self.passes
+
+
+@dataclass
 class AgentRun:
     """What one SDK run produced. ``cost_usd`` is what the Budget spends."""
 
@@ -441,7 +456,14 @@ class AgentWorkspace(Target):
         self._lock = threading.Lock()
         self._worktree_root: str | None = None
         self.patches: list[Patch] = []
-        self.task_id: str = ""  # set on a session, for patch attribution
+        self.landed: list[Patch] = []
+        self.discarded: list[Patch] = []
+        self.task_id: str = ""      # set on a session, for patch attribution
+        self.produced_by: str = ""  # which brief is working in this session
+        # A session points back at the repository it was cut from; the main
+        # workspace points at itself. A tactic that must act on the *real* tree
+        # (landing a patch) reaches it through here.
+        self.root: AgentWorkspace = self
 
     # --- per-ant isolation ---------------------------------------------------
 
@@ -461,11 +483,17 @@ class AgentWorkspace(Target):
         """
         if not self.isolate:
             return self
+        child = self._add_worktree(prefix="ant")
+        child.task_id = str(getattr(task, "id", "") or "")
+        return child
+
+    def _add_worktree(self, *, prefix: str = "wt") -> "AgentWorkspace":
+        """A detached checkout of HEAD, as a workspace in its own right."""
         with self._lock:
             if self._worktree_root is None:
                 # Outside the repo, or git would treat it as untracked content.
                 self._worktree_root = tempfile.mkdtemp(prefix="tactics-worktrees-")
-            path = os.path.join(self._worktree_root, f"ant-{uuid.uuid4().hex[:8]}")
+            path = os.path.join(self._worktree_root, f"{prefix}-{uuid.uuid4().hex[:8]}")
             code, out = self.run(["git", "worktree", "add", "--detach", path, "HEAD"])
         if code != 0:
             # Fail loudly. Silently sharing the main tree is the exact corruption
@@ -480,8 +508,43 @@ class AgentWorkspace(Target):
             shell=self._shell if self._custom_shell else None,
             model=self.model,
         )
-        child.task_id = str(getattr(task, "id", "") or "")
+        child.root = self
         return child
+
+    def trial(self, patch: Patch) -> PatchTrial:
+        """Apply a candidate patch to a scratch checkout of HEAD and measure it.
+
+        This is what makes choosing between patches an act of measurement rather
+        than an opinion. A patch that passed in the tree it was born in may still
+        fail here — HEAD has moved, or another patch landed first — and that is
+        precisely what a selector needs to know. Nothing touches the real tree.
+        """
+        try:
+            scratch = self._add_worktree(prefix="trial")
+        except RuntimeError as exc:
+            return PatchTrial(applies=False, passes=False, detail=str(exc))
+        try:
+            applied, out = scratch.apply_patch(patch)
+            if not applied:
+                return PatchTrial(applies=False, passes=False, detail=out.strip()[-300:])
+            passes, output = scratch.verify()
+            return PatchTrial(applies=True, passes=passes,
+                              detail="" if passes else output.strip()[-300:])
+        finally:
+            self.run(["git", "worktree", "remove", "--force", scratch.path])
+
+    def land(self, patch: Patch) -> None:
+        """Record a patch as landed and retire the alternatives.
+
+        The patches of a fan-out are competing answers to the *same* goal, so once
+        one is in, applying another would stack a second implementation on top of
+        the first. The rest are moved to ``discarded`` rather than deleted — a
+        losing candidate is still evidence.
+        """
+        with self._lock:
+            self.landed.append(patch)
+            self.discarded.extend(p for p in self.patches if p is not patch)
+            self.patches = []
 
     def release(self, session: "Target") -> None:
         """Lift the work out as a patch, then remove the worktree."""
@@ -496,15 +559,17 @@ class AgentWorkspace(Target):
     def capture_patch(self) -> Patch:
         """The full diff of this workspace, including files the agent created."""
         self.run(["git", "add", "-A", "-N"])  # intent-to-add: untracked files show up
-        _code, text = self.run(["git", "diff"])
-        return Patch(task=self.task_id, text=text, files=self.changed_files())
+        return Patch(task=self.task_id, text=self.diff_text(), files=self.changed_files(),
+                     tactic=self.produced_by)
 
     def apply_patch(self, patch: Patch) -> tuple[bool, str]:
         """Land a patch on this repository. Irreversible enough to gate.
 
         Concurrent ants can produce patches that touch the same lines; ``--3way``
         resolves what it can and fails loudly on the rest rather than mangling
-        the tree.
+        the tree. Note that ``--3way`` *stages* what it applies, so a landed
+        patch shows up under ``git diff --cached`` rather than ``git diff`` — the
+        change is ready to review and commit, not silently in the working tree.
         """
         handle, tmp = tempfile.mkstemp(suffix=".patch")
         try:
@@ -576,7 +641,11 @@ class AgentWorkspace(Target):
         return f"{self.run(['git', 'status', '--porcelain'])[1]}\x00{self.diff_text()}"
 
     def diff_text(self) -> str:
-        code, out = self.run(["git", "diff"])
+        # `git diff HEAD`, not `git diff`: an agent is free to stage its own work
+        # (a `git add` through Bash is an ordinary thing to do), and plain
+        # `git diff` shows only what is *un*staged — so the work would come back
+        # as an empty diff and be silently dropped.
+        code, out = self.run(["git", "diff", "HEAD"])
         return out if code == 0 else ""
 
     def verify(self) -> tuple[bool, str]:
@@ -644,6 +713,8 @@ class BriefTactic(Tactic):
         if broken:  # never spend money on a brief that cannot do its job
             return Outcome(success=False, reward=0.0, notes=f"misconfigured brief: {broken}")
         bridge = GateBridge(ctx, self.spec.allowed_tools)
+        # Stamp the session so the patch it yields says which brief wrote it.
+        setattr(ctx.target, "produced_by", self.name)
         before_snapshot = ctx.target.snapshot()
         before_files = set(ctx.target.changed_files())
         brief = self._with_lessons(self.build_brief(ctx), ctx)
@@ -763,6 +834,172 @@ class ReviewedSwarm(BriefTactic):
             }
         },
     )
+
+
+_JUDGE_SYSTEM = (
+    "You choose between candidate patches that have ALL already been verified: "
+    "each one applies cleanly and passes the repository's own check. Your job is "
+    "the remaining question — which is the better change to keep. Prefer the "
+    "smallest change that fully does the job, code that matches the surrounding "
+    "style, and tests that would catch a real regression. Respond ONLY with the "
+    "requested JSON object."
+)
+
+_JUDGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "choice": {"type": "integer"},
+        "why": {"type": "string"},
+    },
+    "required": ["choice", "why"],
+    "additionalProperties": False,
+}
+
+
+class ApplyBestPatch(Tactic):
+    """Pick among the patches a fan-out produced, and land one through the gate.
+
+    A parallel round leaves several competing answers to the same goal in
+    ``target.patches``, each verified in the worktree it was born in. Choosing
+    between them by hand is the last manual step in the loop; this closes it.
+
+    **The choice is measured before it is judged.** Every candidate is re-tried
+    against a scratch checkout of the *current* HEAD — a patch that passed where
+    it was written can still fail here, because HEAD moved or because an earlier
+    patch landed first, and that is exactly what a selector needs to know.
+    Candidates that fail are out, with a reason. Only among the survivors does
+    anything softer apply: the deterministic tie-break is the smallest verified
+    diff, and an optional ``judge`` (any ``LLMClient``) may re-order *those* — it
+    is shown them already in that ranked order, so its answer is a considered
+    override of a defensible default rather than a choice made from nothing.
+
+    The judge can never promote a failing patch, and it fails closed: an answer
+    that is unparseable, or that names a candidate outside the verified set, is
+    discarded in favour of the deterministic pick. A model's opinion is allowed
+    to break a tie between proven options; it is never allowed to be the proof.
+
+    Landing writes the real repository, so it goes through ``ctx.gate``. Under
+    ``DryRun`` the whole selection still runs and the journal records which patch
+    *would* have landed and why — a review artifact rather than a write.
+    """
+
+    def __init__(self, *, judge: Any = None, name: str | None = None) -> None:
+        super().__init__(name=name)
+        self.judge = judge
+
+    def _repo(self, ctx: Any) -> "AgentWorkspace":
+        # Reach past an isolated session: landing is a change to the real tree.
+        return getattr(ctx.target, "root", ctx.target)
+
+    def is_applicable(self, ctx: Any) -> bool:
+        return bool(getattr(self._repo(ctx), "patches", None))
+
+    # --- choosing -------------------------------------------------------------
+
+    @staticmethod
+    def _rank(candidate: tuple[Patch, PatchTrial]) -> tuple[int, int, str]:
+        """Smallest verified change first; ties broken deterministically."""
+        patch, _trial = candidate
+        return (len(patch.text.splitlines()), len(patch.files), patch.task)
+
+    def _ask_judge(self, survivors: list[tuple[Patch, PatchTrial]], ctx: Any) -> tuple[int | None, float, str]:
+        listing = "\n\n".join(
+            f"### Candidate {i}\nwritten by: {patch.tactic or '(unknown brief)'}\n"
+            f"files: {patch.files}\n```diff\n{patch.text[:4000]}\n```"
+            for i, (patch, _t) in enumerate(survivors)
+        )
+        prompt = (
+            f"{len(survivors)} candidate patches all apply cleanly and pass the check. "
+            f"Choose the one to keep.\n\n{listing}\n\n"
+            'Reply as JSON: {"choice": <candidate number>, "why": "<one sentence>"}.'
+        )
+        try:
+            resp = self.judge.complete(prompt, system=_JUDGE_SYSTEM, schema=_JUDGE_SCHEMA,
+                                       max_tokens=1024)
+            data = extract_json(resp.text)
+            choice = int(data.get("choice", -1))
+        except Exception as exc:  # noqa: BLE001 - a bad judgment is not a crash
+            return None, 0.0, f"judge unusable ({exc!r})"
+        cost = float(getattr(resp, "tokens", 0))
+        if not 0 <= choice < len(survivors):
+            return None, cost, f"judge named candidate {choice}, which is not on the list"
+        return choice, cost, str(data.get("why", ""))[:200]
+
+    def execute(self, ctx: Any) -> Outcome:
+        repo = self._repo(ctx)
+        journal = getattr(ctx, "journal", None)
+        candidates = list(repo.patches)
+
+        trials = [(patch, repo.trial(patch)) for patch in candidates]
+        survivors = [(patch, trial) for patch, trial in trials if trial.ok]
+        metrics = {"candidates": len(candidates), "verified": len(survivors)}
+        if journal is not None:
+            for patch, trial in trials:
+                journal.record("patch.trial", tactic=patch.tactic, files=len(patch.files),
+                               applies=trial.applies, passes=trial.passes,
+                               detail=trial.detail[:120])
+
+        if not survivors:
+            why = "; ".join(
+                f"{p.tactic or p.task}: {'does not apply' if not t.applies else 'check fails'}"
+                for p, t in trials
+            )
+            return Outcome(success=False, reward=0.0, metrics=metrics,
+                           notes=f"no candidate survived re-verification — {why}")
+
+        survivors.sort(key=self._rank)
+        chosen, _trial = survivors[0]
+        reason = "smallest verified diff"
+        cost = 0.0
+        if self.judge is not None and len(survivors) > 1:
+            pick, cost, why = self._ask_judge(survivors, ctx)
+            if pick is None:
+                reason = f"deterministic — {why}"  # fail closed onto the measured order
+            else:
+                chosen, _trial = survivors[pick]
+                reason = f"judge: {why}"
+        metrics["chose"] = chosen.tactic or chosen.task
+
+        result = ctx.gate.submit(
+            Proposal(
+                action=f"land patch from {chosen.tactic or chosen.task} "
+                       f"({len(chosen.files)} file(s), {len(chosen.text.splitlines())} diff lines)",
+                commit=lambda: repo.apply_patch(chosen),
+                reversible=True,  # a working-tree change, revertible with git
+                risk="medium",    # but it is the real repository, not a worktree
+                detail={"reason": reason, "files": chosen.files,
+                        "rejected": len(candidates) - 1},
+            ),
+            ctx,
+        )
+        if not result.committed:
+            return Outcome(success=False, reward=0.0, cost=cost, metrics=metrics,
+                           notes=f"selected {metrics['chose']} ({reason}) but the gate held it")
+
+        applied, out = result.result
+        if not applied:  # verified in a scratch tree yet refused by the real one
+            return Outcome(success=False, reward=0.0, cost=cost, metrics=metrics,
+                           notes=f"apply failed after a clean trial: {out.strip()[-200:]}")
+        repo.land(chosen)
+        return Outcome(success=True, reward=1.0, cost=cost, metrics=metrics,
+                       notes=f"landed {metrics['chose']} ({reason}); "
+                             f"{len(candidates) - 1} alternative(s) discarded")
+
+
+def land_best_patch(target: "AgentWorkspace", *, gate: Any = None, judge: Any = None,
+                    journal: Any = None, goal: Goal | None = None) -> Outcome:
+    """Run :class:`ApplyBestPatch` once, outside a colony. Returns its Outcome."""
+    from ..core.approval import AutoApprove
+    from ..core.journal import Journal
+
+    ctx = Context(
+        target=target, goal=goal or Goal(name="land_patch"), data={}, features={},
+        gate=gate or AutoApprove(), journal=journal or Journal(),
+    )
+    tactic = ApplyBestPatch(judge=judge)
+    if not tactic.is_applicable(ctx):
+        return Outcome(success=False, reward=0.0, notes="no candidate patches to choose from")
+    return tactic.execute(ctx)
 
 
 def delivery_goal(description: str, name: str = "delivery") -> Goal:

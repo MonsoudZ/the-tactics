@@ -110,8 +110,13 @@ def fan_out() -> None:
         print(f"  briefs tried     : {briefs}   <- three different ones, one round")
         print(f"  patches captured : {len(ws.patches)} ({len({p.text for p in ws.patches})} distinct)")
         print(f"  main repo dirty  : {ws.changed_files()}   <- never written to")
-        ok, _ = ws.apply_patch(ws.patches[0])
-        print(f"  landed one patch : ok={ok}, repo now {ws.changed_files()}")
+        # Choosing is measured, not guessed: each candidate is re-tried against a
+        # scratch checkout of HEAD, and only survivors compete.
+        from tactics.playbooks.agent_sdk import land_best_patch
+
+        picked = land_best_patch(ws)
+        print(f"  selection        : {picked.notes}")
+        print(f"  repo now         : {ws.changed_files()}")
     finally:
         ws.cleanup()
 

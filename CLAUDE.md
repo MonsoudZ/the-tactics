@@ -126,6 +126,7 @@ precisely this framework. So don't compete with the harness; govern it.
 | journal attribution | PreToolUse `agent_type` | A swarm's audit trail says *which ant* asked — "code-reviewer subagent tool call: Bash". |
 | `Target.session` | one **git worktree** per ant | `max_workers > 1` without it is refused: parallel agents in one tree make every diff unattributable. Work comes back as `target.patches`; the main repo is never written. |
 | `JsonStore` + `JsonlLessons` | `<repo>/.tactics/` | `persist=True` keeps both halves of memory beside the code they describe: which brief wins here, and what past runs learned. |
+| `ApplyBestPatch` | candidates → one landed change | Closes the last manual step: each candidate is re-tried against current HEAD, and only survivors compete. |
 
 **Never send the brief's roster as the SDK's `allowed_tools`, and never gate
 through `can_use_tool`.** `allowed_tools` *grants* permission: a whole-tool entry
@@ -181,6 +182,22 @@ brief, and added `WriteTestFirst 3 runs / 3.0` to the same file; briefs arrived
 carrying a stored lesson. Note what UCB does here — it tries an unmeasured brief
 before exploiting a proven one, so "it picked the winner" is only meaningful once
 every brief has a record.
+
+**Choosing among candidates (`ApplyBestPatch`, verified live).** A fan-out leaves
+several answers to one goal in `target.patches`. The tactic re-tries every
+candidate against a scratch checkout of the *current* HEAD — passing where it was
+born is not the same as passing here, since HEAD may have moved or another patch
+landed — and only survivors compete. The deterministic pick is the smallest
+verified diff; an optional `judge` (any `LLMClient`) may re-order *those*, sees
+them already ranked, and fails closed: an unparseable answer, or one naming a
+candidate outside the verified set, falls back to the measured order and says so.
+A model's opinion breaks ties between proven options; it is never the proof.
+Landing goes through the gate (`reversible`, `risk="medium"`), so `DryRun` still
+runs the whole selection and leaves a review artifact naming what *would* have
+landed. Winning patch → `landed`, the rest → `discarded` (they are alternative
+answers to the same goal; stacking a second one is not a merge). Note `git apply
+--3way` **stages** what it applies — a landed change shows under `git diff
+--cached`, not `git diff`.
 
 **Subagents (verified live).** The PreToolUse hook fires *inside* subagents too,
 carrying `agent_type` — so a brief cannot delegate its way around the gate, and
@@ -267,7 +284,10 @@ python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code a
   Compounding is live too (`persist=True` across two processes; lessons reaching
   a real agent's brief), and so is per-round spread (3 ants, 3 different briefs,
   3 distinct patches, against memory that favoured one of them).
-  Still unexercised: `max_turns`, and `max_workers` above 3.
+  Patch selection is live too (3 candidates from 3 briefs, all re-verified,
+  smallest landed, suite green on the result; a real LLM judge returning a
+  reasoned choice, and the fail-closed fallback firing for real when the judge
+  errored). Still unexercised: `max_turns`, and `max_workers` above 3.
 - **The scribe has written nothing in five live runs.** The path is wired and
   works (proven offline with a scripted client): it builds the prompt, the model
   returns well-formed `{"lessons": []}`, and it correctly records nothing. But
@@ -298,9 +318,10 @@ python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code a
 - [x] Playbook: agent-sdk — the Claude Agent SDK as a governed Target: competing
       briefs, PreToolUse hook → approval gate, dollar-denominated Budget, verified
       reward, git-worktree fan-out for parallel ants (`playbooks/agent_sdk.py`).
-      `persist=True` compounds both halves of memory across runs, and parallel
-      rounds spread across briefs. Next: a tactic that picks among the captured
-      patches instead of applying one by hand.
+      `persist=True` compounds both halves of memory across runs, parallel rounds
+      spread across briefs, and `ApplyBestPatch` chooses among the candidates.
+      Next: run it against a repo whose failures repeat, so the scribe has
+      something durable to record.
 - [ ] Playbook: trading — alerts, shift/buy/sell against a goal.
 - [x] Playbook: lead-finder — score bad sites, draft + send outreach (`playbooks/lead_finder.py`, dry-run by default).
 - [ ] Playbook: gift-cards — production-readiness checks.
