@@ -9,7 +9,8 @@ The split this playbook exists for:
 
 This demo runs a *scripted* agent (no SDK, no API key, no network) so you can
 watch the machinery. Swap the ``runner`` out and the same colony drives a real
-Claude Code agent against a real repo.
+Claude Code agent against a real repo — verified against SDK 0.2.152, where the
+three postures below produced 0, 2 and 2 written files respectively.
 
 Run it:  python3 examples/agent_sdk_demo.py
 """
@@ -37,6 +38,7 @@ class ScriptedAgent:
         for tool, payload in (
             ("Read", {"file_path": "parser.py"}),
             ("Write", {"file_path": "parser.py"}),
+            ("Bash", {"command": "python -m pytest -q"}),
             ("Bash", {"command": "git push origin main"}),  # the one a human should see
         ):
             allowed, _ = bridge.decide(tool, payload)

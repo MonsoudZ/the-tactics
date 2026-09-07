@@ -120,8 +120,20 @@ precisely this framework. So don't compete with the harness; govern it.
 |------|-----------|----------------|
 | `AgentWorkspace(Target)` | `run_agent()` does the work; `verify()` measures it | Two separate methods on purpose — reward is measured, never self-reported. `runner` is injectable, so all 24 tests run with no SDK, key, or network. |
 | `BriefTactic` | a brief *is* a tactic (system prompt + tool allowlist + subagent roster) | Brief shapes compete and the policy learns which wins where. `SingleAgentNarrow` · `WriteTestFirst` · `PlanThenPatch` · `ReviewedSwarm`. |
-| `GateBridge` | `ctx.gate` → the SDK's `can_use_tool` callback | Every write, Bash command, and unknown tool is classified and decided by *our* gate and lands in *our* journal. `DryRun` = a colony that cannot write a byte. |
+| `GateBridge` | `ctx.gate` → the SDK's **PreToolUse hook** | Every write, Bash command, and unknown tool is classified and decided by *our* gate and lands in *our* journal. `DryRun` = a colony that cannot write a byte. |
 | `Outcome.cost` | `ResultMessage.total_cost_usd` | `Budget(max_cost=5.00)` is a real dollar ceiling on an autonomous swarm. |
+
+**Never send the brief's roster as the SDK's `allowed_tools`, and never gate
+through `can_use_tool`.** `allowed_tools` *grants* permission: a whole-tool entry
+auto-approves that tool before any callback runs. The first live run did exactly
+this and a `DryRun` colony wrote two files. `permission_mode "bypassPermissions"`
+and settings-file allow rules shadow the callback the same way — so permission
+goes through a PreToolUse hook (which sees every call), the roster is enforced by
+`GateBridge`, and `bypassPermissions` is refused outright. Content blocks are
+matched **structurally** (`name`+`input`), not by a `type` field the installed
+dataclasses do not have — that read silently reported zero tool calls. Work is
+measured against a **snapshot taken before the run**, because a tree that was
+already dirty otherwise banks a win the agent didn't earn.
 
 Rules: `classify_tool_call` is **fail-closed** — an unclassified tool is
 irreversible + high risk, so a `PolicyGate` escalates it. Cost comes from
@@ -189,12 +201,16 @@ python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code a
 - **`ScriptedClient` isn't thread-safe** (its response index races). It's a
   test/demo helper — run LLM colony demos with `max_workers=1`. `ClaudeClient`
   (the production path) is fine in parallel.
-- **`agent_sdk._sdk_runner` has never run against a live SDK.** Every test uses the
-  injected `runner`, so the decision logic is proven and the *adapter* is not. Its
-  message-shape reads are defensive (`getattr`, optional cost fields) and it
-  filters options to the fields the installed `ClaudeAgentOptions` declares, so a
-  version skew drops an option rather than raising — but the first real run should
-  be a `DryRun` against a scratch repo, and check that `cost_usd` is non-zero.
+- **`agent_sdk._sdk_runner` is now live-verified against SDK 0.2.152** (CLI 2.1.263),
+  on a scratch clone, in all three gate postures: `DryRun` → 6 tool calls, 4 held,
+  0 bytes written; `AutoApprove` → 15 calls, 2 files written, suite green, $0.20;
+  `PolicyGate` → edits committed, all 8 Bash calls held, still verified green by
+  *our* check rather than the agent's. That first run also found three real bugs
+  (allowed-tools shadowing, `type`-field block parsing, absolute-dirtiness reward),
+  each now covered by a regression test that fails against the pre-fix code.
+  Still unexercised: `agents=` subagent rosters (`ReviewedSwarm`) and `max_turns`
+  have never run live — `ReviewedSwarm` is the one whose cost accounting most
+  depends on `total_cost_usd` being right.
 - **The single `Agent` loop isolates tactic errors but not `observe()`/goal-predicate
   errors.** The `Colony` (the production path) isolates everything. Keep `Target.observe`
   and `Goal.is_satisfied` total/non-throwing.

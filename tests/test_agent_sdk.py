@@ -176,7 +176,7 @@ def test_an_agent_that_changed_nothing_is_a_loss_not_a_win():
     agent = ScriptedAgent(tool_calls=[("Read", {"file_path": "a.py"})])
     out = SingleAgentNarrow().execute(_ctx(_workspace(agent)))
     assert out.success is False and out.reward == 0.0
-    assert "no changes" in out.notes
+    assert "untouched" in out.notes
 
 
 def test_a_crashed_run_is_a_loss_and_still_reports_its_cost():
@@ -273,3 +273,197 @@ def test_colony_under_dry_run_writes_nothing():
     colony.run(delivery_goal("make the parser handle empty input"))
     assert agent.edited is False
     assert "gate.hold" in {e.kind for e in colony.journal.events}
+
+
+# --- the adapter itself ------------------------------------------------------
+#
+# Everything above proves the *decision* logic. These prove the *wiring* — the
+# options actually handed to the SDK. That gap is not theoretical: the first live
+# run sent the brief's tool roster as `allowed_tools`, which auto-approved every
+# one of those tools before any permission callback ran, and a DryRun colony
+# wrote two files. A fake SDK module lets us assert the invariants offline.
+
+import sys
+import types as _types
+from dataclasses import dataclass, field as _field
+
+
+class _FakeToolUse:
+    """Shaped like the installed ToolUseBlock: id/name/input, and *no* `type`."""
+
+    def __init__(self, name, input_):
+        self.id, self.name, self.input = "tu_1", name, input_
+
+
+class _FakeText:
+    def __init__(self, text):
+        self.text = text
+
+
+class _FakeAssistant:
+    def __init__(self, content):
+        self.content = content
+
+
+class _FakeResult:
+    def __init__(self, cost=0.5, usage=None, denials=0):
+        self.total_cost_usd = cost
+        self.usage = usage or {"input_tokens": 900, "output_tokens": 120}
+        self.permission_denials = [None] * denials
+
+
+def _install_fake_sdk(monkeypatch, messages=(), captured=None):
+    """Inject a stand-in `claude_agent_sdk` and capture the options built for it."""
+
+    @dataclass
+    class ClaudeAgentOptions:  # mirrors the real dataclass's field names
+        system_prompt: object = None
+        allowed_tools: list = _field(default_factory=list)
+        disallowed_tools: list = _field(default_factory=list)
+        permission_mode: object = None
+        cwd: object = None
+        max_turns: object = None
+        model: object = None
+        agents: object = None
+        hooks: object = None
+        can_use_tool: object = None
+
+    @dataclass
+    class AgentDefinition:
+        description: str
+        prompt: str
+        tools: list | None = None
+        model: str | None = None
+
+    @dataclass
+    class HookMatcher:
+        matcher: str | None = None
+        hooks: list = _field(default_factory=list)
+        timeout: float | None = None
+
+    def query(*, prompt, options):
+        if captured is not None:
+            captured["prompt"] = prompt
+            captured["options"] = options
+
+        async def gen():
+            for m in messages:
+                yield m
+
+        return gen()
+
+    module = _types.ModuleType("claude_agent_sdk")
+    module.ClaudeAgentOptions = ClaudeAgentOptions
+    module.AgentDefinition = AgentDefinition
+    module.HookMatcher = HookMatcher
+    module.query = query
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", module)
+    return module
+
+
+def _run_sdk_runner(monkeypatch, messages=(), spec=None, bridge=None):
+    from tactics.playbooks.agent_sdk import _sdk_runner
+
+    captured: dict = {}
+    _install_fake_sdk(monkeypatch, messages, captured)
+    ws = AgentWorkspace("/repo", check=["true"], shell=lambda cmd: (0, ""))
+    run = _sdk_runner("do the thing", spec or BriefSpec(), bridge, ws)
+    return run, captured
+
+
+def test_the_brief_roster_is_never_sent_as_allowed_tools(monkeypatch):
+    # The regression. `allowed_tools` GRANTS permission — a whole-tool entry
+    # auto-approves that tool before the gate is consulted. The roster is ours
+    # to enforce, so it must not appear here.
+    spec = BriefSpec(allowed_tools=("Read", "Write", "Bash"))
+    _run, captured = _run_sdk_runner(monkeypatch, spec=spec)
+    assert not captured["options"].allowed_tools
+
+
+def test_every_tool_call_goes_through_a_pretooluse_hook(monkeypatch):
+    ctx = _ctx(_workspace(ScriptedAgent()), gate=DryRun())
+    bridge = GateBridge(ctx, ("Read", "Write"))
+    _run, captured = _run_sdk_runner(monkeypatch, bridge=bridge)
+    hooks = captured["options"].hooks
+    assert "PreToolUse" in hooks
+    # matcher=None means "every tool" — a named matcher would leave gaps.
+    assert hooks["PreToolUse"][0].matcher is None
+    assert captured["options"].can_use_tool is None  # the shadowable seam is unused
+
+
+def test_bypass_permissions_is_refused_rather_than_honoured(monkeypatch):
+    spec = BriefSpec(permission_mode="bypassPermissions")
+    run, captured = _run_sdk_runner(monkeypatch, spec=spec)
+    assert "refused" in run.error
+    assert captured == {}  # never even reached the SDK
+
+
+def test_the_hook_denies_under_dry_run(monkeypatch):
+    import asyncio
+
+    bridge = GateBridge(_ctx(_workspace(ScriptedAgent()), gate=DryRun()), ("Write",))
+    _run, captured = _run_sdk_runner(monkeypatch, bridge=bridge)
+    hook = captured["options"].hooks["PreToolUse"][0].hooks[0]
+    out = asyncio.run(hook({"tool_name": "Write", "tool_input": {"file_path": "a.py"}}, "tu_1", {}))
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_the_hook_allows_under_auto_approve(monkeypatch):
+    import asyncio
+
+    bridge = GateBridge(_ctx(_workspace(ScriptedAgent()), gate=AutoApprove()), ("Write",))
+    _run, captured = _run_sdk_runner(monkeypatch, bridge=bridge)
+    hook = captured["options"].hooks["PreToolUse"][0].hooks[0]
+    out = asyncio.run(hook({"tool_name": "Write", "tool_input": {"file_path": "a.py"}}, "tu_1", {}))
+    assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+def test_a_tool_outside_the_brief_roster_is_denied():
+    bridge = GateBridge(_ctx(_workspace(ScriptedAgent())), ("Read", "Edit"))
+    assert bridge.decide("Bash", {"command": "ls"})[0] is False
+    assert bridge.decide("Edit", {"file_path": "a.py"})[0] is True
+
+
+def test_tool_calls_are_counted_structurally_not_by_a_type_field(monkeypatch):
+    # The installed content-block dataclasses carry no `type` field, so a
+    # `block.type == "tool_use"` read matches nothing and reports zero calls.
+    messages = [_FakeAssistant([_FakeToolUse("Write", {"file_path": "a.py"}), _FakeText("done")]),
+                _FakeResult()]
+    run, _captured = _run_sdk_runner(monkeypatch, messages)
+    assert run.tools_used == ["Write"]
+    assert run.text == "done"
+
+
+def test_cost_and_denials_are_read_off_the_result_message(monkeypatch):
+    run, _captured = _run_sdk_runner(monkeypatch, [_FakeResult(cost=1.25, denials=3)])
+    assert run.cost_usd == 1.25
+    assert run.sdk_denials == 3
+
+
+def test_a_missing_sdk_is_a_loss_not_an_import_error(monkeypatch):
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)
+    from tactics.playbooks.agent_sdk import _sdk_runner
+
+    ws = AgentWorkspace("/repo", check=["true"], shell=lambda cmd: (0, ""))
+    run = _sdk_runner("x", BriefSpec(), None, ws)
+    assert run.error and run.cost_usd == 0.0
+
+
+# --- baseline, not absolute dirtiness ----------------------------------------
+
+
+def test_a_tree_that_was_already_dirty_is_not_counted_as_the_agents_work():
+    # Found live: a pre-existing modified file made a run that wrote nothing
+    # score 1.0. Absolute dirtiness is not evidence of work.
+    agent = ScriptedAgent(tool_calls=[("Read", {"file_path": "a.py"})])
+    agent.edited = True  # the tree is dirty before the agent ever runs
+    out = SingleAgentNarrow().execute(_ctx(_workspace(agent)))
+    assert out.success is False and out.reward == 0.0
+    assert "untouched" in out.notes
+
+
+def test_roster_denials_are_journalled_like_every_other_refusal():
+    journal = Journal()
+    bridge = GateBridge(_ctx(_workspace(ScriptedAgent()), journal=journal), ("Read",))
+    bridge.decide("Bash", {"command": "ls"})
+    assert "brief.deny" in {e.kind for e in journal.events}

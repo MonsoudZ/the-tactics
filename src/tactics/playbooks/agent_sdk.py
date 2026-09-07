@@ -19,9 +19,11 @@ Four seams do the joining, and each one is a contract that already existed:
     and the policy learns which shape wins on which kind of task. This is the
     thing a static roster of markdown prompts cannot do.
   * **ApprovalGate** — :class:`GateBridge` adapts ``ctx.gate`` to the SDK's
-    ``can_use_tool`` callback, so every write, every Bash command, every unknown
-    tool is classified and decided by *our* gate, and lands in *our* journal.
-    ``DryRun`` turns the whole colony into a proposal engine that cannot write.
+    PreToolUse hook, so every write, every Bash command, every unknown tool is
+    classified and decided by *our* gate, and lands in *our* journal. ``DryRun``
+    turns the whole colony into a proposal engine that cannot write. (The hook
+    rather than ``can_use_tool`` for a reason the first live run taught us the
+    hard way — see :class:`GateBridge`.)
   * **Budget** — ``Outcome.cost`` carries the run's dollar estimate, so
     ``Budget(max_cost=5.00)`` is a real ceiling on an autonomous swarm.
 
@@ -111,10 +113,10 @@ def classify_tool_call(tool_name: str, input_data: dict[str, Any]) -> tuple[bool
 
 
 class GateBridge:
-    """Adapts this framework's :class:`ApprovalGate` to the SDK's ``can_use_tool``.
+    """Adapts this framework's :class:`ApprovalGate` to the SDK's permission system.
 
-    This is the load-bearing join. The SDK asks "may I run this tool?"; the
-    answer comes from ``ctx.gate`` — the same gate that governs every other
+    This is the load-bearing join. Before any tool runs, the SDK asks "may I?";
+    the answer comes from ``ctx.gate`` — the same gate that governs every other
     tactic — and the decision is written to ``ctx.journal``. Consequences that
     fall out for free:
 
@@ -124,18 +126,34 @@ class GateBridge:
         a human.
       * ``CallbackGate`` → your own hook sees every call.
 
-    Denials are returned with ``interrupt=False`` so the agent learns the
-    boundary and routes around it rather than dying mid-task.
+    **It asks through a PreToolUse hook, and that choice is load-bearing.** The
+    SDK's other permission seam, ``can_use_tool``, is *shadowed*: an
+    ``allowed_tools`` entry naming a whole tool — or ``permission_mode
+    "bypassPermissions"``, or an allow rule in a settings file — auto-approves
+    the call before the callback is ever consulted. A gate with a silent bypass
+    is not a gate. A PreToolUse hook sees every call regardless.
+
+    ``brief_tools`` is the roster the brief declared. It is enforced *here*, not
+    by the SDK's ``allowed_tools`` (which grants permission rather than
+    withholding it), so a brief that says "Read and Edit only" means it.
     """
 
-    def __init__(self, ctx: Any) -> None:
+    def __init__(self, ctx: Any, brief_tools: tuple[str, ...] | None = None) -> None:
         self.ctx = ctx
+        self.brief_tools = frozenset(brief_tools) if brief_tools else None
         self.allowed: list[str] = []
         self.denied: list[str] = []
 
     def decide(self, tool_name: str, input_data: dict[str, Any] | None = None) -> tuple[bool, str]:
         """Sync decision core — the whole permission model, testable without the SDK."""
         input_data = input_data or {}
+        if self.brief_tools is not None and tool_name not in self.brief_tools:
+            self.denied.append(tool_name)
+            reason = f"{tool_name} is outside this brief's tool allowlist"
+            journal = getattr(self.ctx, "journal", None)
+            if journal is not None:  # a refusal nobody can see is a refusal nobody trusts
+                journal.record("brief.deny", tool=tool_name, reason=reason)
+            return False, reason
         if tool_name in READ_ONLY_TOOLS:
             self.allowed.append(tool_name)
             return True, "read-only"
@@ -169,18 +187,22 @@ class GateBridge:
         (self.allowed if result.approved else self.denied).append(tool_name)
         return result.approved, result.reason
 
-    def as_callback(self) -> Callable[..., Any]:
-        """Return the async ``can_use_tool`` callback the SDK expects."""
+    def as_hook(self) -> Callable[..., Any]:
+        """Return the async PreToolUse hook callback — the un-shadowable seam."""
 
-        async def can_use_tool(tool_name, input_data, context):  # noqa: ANN001 - SDK contract
-            from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+        async def pre_tool_use(hook_input, tool_use_id, context):  # noqa: ANN001 - SDK contract
+            approved, reason = self.decide(
+                hook_input.get("tool_name", ""), hook_input.get("tool_input") or {}
+            )
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow" if approved else "deny",
+                    "permissionDecisionReason": reason,
+                }
+            }
 
-            approved, reason = self.decide(tool_name, input_data)
-            if approved:
-                return PermissionResultAllow(updated_input=input_data)
-            return PermissionResultDeny(message=reason, interrupt=False)
-
-        return can_use_tool
+        return pre_tool_use
 
 
 @dataclass
@@ -210,17 +232,30 @@ class AgentRun:
     output_tokens: int = 0
     tools_used: list[str] = field(default_factory=list)
     denied: list[str] = field(default_factory=list)
+    # What the SDK itself counted as denied — an independent check on our own
+    # tally, so a gate that silently stopped firing shows up as a mismatch.
+    sdk_denials: int = 0
     error: str = ""
 
 
 def _sdk_runner(brief: str, spec: BriefSpec, bridge: GateBridge | None, ws: "AgentWorkspace") -> AgentRun:
     """Run a real SDK agent. Lazy-imports ``claude_agent_sdk``.
 
+    Three things here are the difference between a gate and the appearance of one,
+    and all three were learned from the first live run:
+
+    * **The brief's tool roster is never sent as ``allowed_tools``.** That option
+      *grants* permission — every tool named in it is auto-approved before any
+      callback runs. Sending the roster there silently disabled the gate and a
+      ``DryRun`` colony wrote two files. The roster is enforced by the bridge.
+    * **Permission goes through a PreToolUse hook**, which sees every call.
+    * **``bypassPermissions`` is refused outright**, because it shadows the hook.
+
     Cost comes from ``ResultMessage.total_cost_usd``, not from summing assistant
     usage: with subagents the ``usage`` field counts only the top-level loop, so
     a swarm brief would look artificially cheap and the Budget would under-count
     exactly the tactic most able to run away with the bill. (That field is a
-    client-side estimate, good for budgeting, not for billing anyone.)
+    client-side estimate — good for budgeting, not for billing anyone.)
 
     Options are filtered to the fields the installed ``ClaudeAgentOptions``
     actually declares, so a version skew drops an option instead of raising.
@@ -228,14 +263,16 @@ def _sdk_runner(brief: str, spec: BriefSpec, bridge: GateBridge | None, ws: "Age
     import asyncio
     from dataclasses import fields as dataclass_fields
 
+    if spec.permission_mode == "bypassPermissions":
+        return AgentRun(error="refused: permission_mode 'bypassPermissions' bypasses the gate")
+
     try:
-        from claude_agent_sdk import AgentDefinition, ClaudeAgentOptions, query
+        from claude_agent_sdk import AgentDefinition, ClaudeAgentOptions, HookMatcher, query
     except ImportError as exc:
         return AgentRun(error=f"claude-agent-sdk not installed: {exc}")
 
     wanted: dict[str, Any] = {
         "system_prompt": spec.system_prompt or None,
-        "allowed_tools": list(spec.allowed_tools),
         "permission_mode": spec.permission_mode,
         "cwd": ws.path,
         "max_turns": spec.max_turns,
@@ -246,7 +283,9 @@ def _sdk_runner(brief: str, spec: BriefSpec, bridge: GateBridge | None, ws: "Age
             name: AgentDefinition(**definition) for name, definition in spec.agents.items()
         }
     if bridge is not None:
-        wanted["can_use_tool"] = bridge.as_callback()
+        # matcher=None matches every tool. This is the only permission seam that
+        # an allowed_tools entry or a settings-file allow rule cannot shadow.
+        wanted["hooks"] = {"PreToolUse": [HookMatcher(hooks=[bridge.as_hook()])]}
 
     known = {f.name for f in dataclass_fields(ClaudeAgentOptions)}
     options = ClaudeAgentOptions(
@@ -256,19 +295,22 @@ def _sdk_runner(brief: str, spec: BriefSpec, bridge: GateBridge | None, ws: "Age
     run = AgentRun()
 
     async def drive() -> None:
+        # Content blocks are matched structurally: the installed dataclasses carry
+        # no discriminating ``type`` field, so a ``block.type == "tool_use"`` read
+        # matches nothing and silently reports zero tool calls.
         async for message in query(prompt=brief, options=options):
             for block in getattr(message, "content", None) or []:
-                if getattr(block, "type", None) == "tool_use":
+                if hasattr(block, "name") and hasattr(block, "input"):
                     run.tools_used.append(getattr(block, "name", "?"))
-                elif getattr(block, "type", None) == "text":
+                elif hasattr(block, "text"):
                     run.text = getattr(block, "text", "")
-            # ResultMessage carries the cumulative totals; both are optional.
-            if hasattr(message, "total_cost_usd"):
+            if hasattr(message, "total_cost_usd"):  # the ResultMessage
                 run.cost_usd = float(getattr(message, "total_cost_usd", None) or 0.0)
                 usage = getattr(message, "usage", None) or {}
                 if isinstance(usage, dict):
                     run.input_tokens = int(usage.get("input_tokens", 0) or 0)
                     run.output_tokens = int(usage.get("output_tokens", 0) or 0)
+                run.sdk_denials = len(getattr(message, "permission_denials", None) or [])
 
     try:
         asyncio.run(drive())
@@ -345,6 +387,17 @@ class AgentWorkspace(Target):
             return []
         return [ln[3:].strip() for ln in out.splitlines() if ln.strip()]
 
+    def snapshot(self) -> str:
+        """A cheap fingerprint of the working tree, for before/after comparison.
+
+        Absolute dirtiness is not evidence: a tree that was already dirty makes
+        every run look like it changed something, and a tactic would bank a win
+        it did not earn. Covers tracked content (``git diff``) and the set of
+        untracked paths (``git status``), so an edit to an already-dirty file
+        still registers.
+        """
+        return f"{self.run(['git', 'status', '--porcelain'])[1]}\x00{self.diff_text()}"
+
     def diff_text(self) -> str:
         code, out = self.run(["git", "diff"])
         return out if code == 0 else ""
@@ -375,7 +428,9 @@ class BriefTactic(Tactic):
         return str(ctx.task.description if ctx.task is not None else ctx.goal.description)
 
     def execute(self, ctx: Any) -> Outcome:
-        bridge = GateBridge(ctx)
+        bridge = GateBridge(ctx, self.spec.allowed_tools)
+        before_snapshot = ctx.target.snapshot()
+        before_files = set(ctx.target.changed_files())
         run = ctx.target.run_agent(self.build_brief(ctx), self.spec, bridge)
         cost = run.cost_usd
         metrics = {
@@ -394,12 +449,13 @@ class BriefTactic(Tactic):
             return Outcome(success=False, reward=0.0, cost=cost, metrics=metrics,
                            notes=f"agent run failed: {run.error[:200]}")
 
-        changed = ctx.target.changed_files()
+        # Measured against the baseline, not against absolute dirtiness.
+        changed = sorted(set(ctx.target.changed_files()) - before_files)
         metrics["changed_files"] = len(changed)
-        if not changed:
+        if ctx.target.snapshot() == before_snapshot:
             held = f" ({len(run.denied)} tool call(s) held by the gate)" if run.denied else ""
             return Outcome(success=False, reward=0.0, cost=cost, metrics=metrics,
-                           notes=f"agent made no changes{held}")
+                           notes=f"agent left the working tree untouched{held}")
 
         passed, output = ctx.target.verify()
         return Outcome(
