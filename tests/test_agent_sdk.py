@@ -467,3 +467,100 @@ def test_roster_denials_are_journalled_like_every_other_refusal():
     bridge = GateBridge(_ctx(_workspace(ScriptedAgent()), journal=journal), ("Read",))
     bridge.decide("Bash", {"command": "ls"})
     assert "brief.deny" in {e.kind for e in journal.events}
+
+
+# --- subagent rosters --------------------------------------------------------
+#
+# All three of these come from the first live ReviewedSwarm run.
+
+
+def test_delegation_is_gated_but_not_treated_as_a_write():
+    # Delegation itself changes nothing; the subagent's own calls fire the same
+    # hook individually (verified live: 6 subagent calls, all gated).
+    from tactics.playbooks.agent_sdk import DELEGATION_TOOLS
+
+    for tool in DELEGATION_TOOLS:
+        assert classify_tool_call(tool, {}) == (True, "low")
+    bridge = GateBridge(_ctx(_workspace(ScriptedAgent())), tuple(DELEGATION_TOOLS))
+    assert bridge.decide("Agent", {})[0] is True
+
+
+def test_the_swarm_roster_carries_the_delegation_tool_under_both_names():
+    # Found live: the roster listed "Task" while the installed CLI names the tool
+    # "Agent", so the gate denied the one call the brief existed to make — and it
+    # still scored 1.0, as a solo run wearing a swarm's name.
+    from tactics.playbooks.agent_sdk import DELEGATION_TOOLS
+
+    assert DELEGATION_TOOLS <= set(ReviewedSwarm().spec.allowed_tools)
+
+
+def test_a_brief_that_cannot_reach_its_subagents_fails_before_spending():
+    from tactics.playbooks.agent_sdk import _roster_error
+
+    broken = BriefSpec(allowed_tools=("Read", "Edit"), agents={"reviewer": {"description": "d", "prompt": "p"}})
+    assert _roster_error(broken)
+
+    class Broken(BriefTactic):
+        spec = broken
+
+    agent = ScriptedAgent()
+    out = Broken().execute(_ctx(_workspace(agent)))
+    assert out.success is False and out.cost == 0.0
+    assert not agent.briefs  # refused before the SDK was ever called
+    assert "misconfigured brief" in out.notes
+
+
+def test_subagent_calls_are_attributed_in_the_journal():
+    journal = Journal()
+    bridge = GateBridge(_ctx(_workspace(ScriptedAgent()), journal=journal))
+    bridge.decide("Write", {"file_path": "a.py"}, agent="code-reviewer")
+    event = next(e for e in journal.events if e.kind == "gate.commit")
+    assert "code-reviewer subagent" in event.data["action"]
+
+
+def test_the_hook_passes_subagent_attribution_through(monkeypatch):
+    import asyncio
+
+    journal = Journal()
+    bridge = GateBridge(_ctx(_workspace(ScriptedAgent()), journal=journal), ("Write",))
+    _run, captured = _run_sdk_runner(monkeypatch, bridge=bridge)
+    hook = captured["options"].hooks["PreToolUse"][0].hooks[0]
+    asyncio.run(hook(
+        {"tool_name": "Write", "tool_input": {"file_path": "a.py"},
+         "agent_id": "ag_1", "agent_type": "code-reviewer"}, "tu_1", {}))
+    assert "code-reviewer subagent" in journal.events[-1].data["action"]
+
+
+# --- cost accounting with subagents ------------------------------------------
+
+
+class _FakeResultWithModels:
+    def __init__(self, cost, usage, model_usage):
+        self.total_cost_usd = cost
+        self.usage = usage
+        self.model_usage = model_usage
+        self.permission_denials = []
+
+
+def test_tokens_come_from_model_usage_because_usage_omits_subagents(monkeypatch):
+    # Live numbers from a ReviewedSwarm run: `usage` reported 512 output tokens
+    # for a call that actually produced 5388.
+    msg = _FakeResultWithModels(
+        cost=0.2178,
+        usage={"input_tokens": 2, "output_tokens": 512},
+        model_usage={
+            "claude-sonnet-5": {"inputTokens": 34, "outputTokens": 5388},
+            "claude-haiku-4-5": {"inputTokens": 950, "outputTokens": 13},
+        },
+    )
+    run, _captured = _run_sdk_runner(monkeypatch, [msg])
+    assert run.output_tokens == 5401  # not 512
+    assert run.input_tokens == 984
+    assert run.models == ["claude-haiku-4-5", "claude-sonnet-5"]
+
+
+def test_the_last_result_wins_because_it_carries_the_call_total(monkeypatch):
+    # A call can emit more than one result message; each later one carries the
+    # running total for the whole call, so summing would double-count.
+    run, _captured = _run_sdk_runner(monkeypatch, [_FakeResult(cost=0.1478), _FakeResult(cost=0.2178)])
+    assert run.cost_usd == 0.2178

@@ -45,6 +45,9 @@ class ScriptedAgent:
             run.tools_used.append(tool)
             if allowed and tool == "Write":
                 self.edited = True
+        # A delegated call, as a real swarm brief produces. The gate sees the
+        # subagent's calls individually — delegation is not a way around it.
+        bridge.decide("Bash", {"command": "pytest -q"}, agent="code-reviewer")
         run.denied = list(bridge.denied)
         return run
 

@@ -62,9 +62,16 @@ from ..core.target import Target
 # Tools that only read. They never reach the gate — gating them would flood the
 # journal with noise and teach reviewers to skim it, which is how a real approval
 # gets waved through.
+# "Agent" is delegation (spawning a subagent); "Task" is the older name for the
+# same tool — carry both, since the live tool name varies by CLI version and a
+# roster that misses it silently degrades a swarm brief into a solo one.
+# Delegation itself changes nothing: the subagent's own tool calls fire this same
+# hook, individually, and are gated on their own merits.
+DELEGATION_TOOLS = frozenset({"Agent", "Task"})
+
 READ_ONLY_TOOLS = frozenset(
-    {"Read", "Grep", "Glob", "NotebookRead", "WebSearch", "WebFetch", "TodoWrite", "Task"}
-)
+    {"Read", "Grep", "Glob", "NotebookRead", "WebSearch", "WebFetch", "TodoWrite"}
+) | DELEGATION_TOOLS
 
 # Tools that change the working tree. Reversible because the workspace is a git
 # repo: the diff is inspectable and revertible before anything is committed.
@@ -144,15 +151,25 @@ class GateBridge:
         self.allowed: list[str] = []
         self.denied: list[str] = []
 
-    def decide(self, tool_name: str, input_data: dict[str, Any] | None = None) -> tuple[bool, str]:
-        """Sync decision core — the whole permission model, testable without the SDK."""
+    def decide(
+        self,
+        tool_name: str,
+        input_data: dict[str, Any] | None = None,
+        agent: str | None = None,
+    ) -> tuple[bool, str]:
+        """Sync decision core — the whole permission model, testable without the SDK.
+
+        ``agent`` names the subagent that made the call (``None`` on the main
+        loop), so a swarm's journal says which ant asked for what.
+        """
         input_data = input_data or {}
+        who = f"{agent} subagent" if agent else "agent"
         if self.brief_tools is not None and tool_name not in self.brief_tools:
             self.denied.append(tool_name)
             reason = f"{tool_name} is outside this brief's tool allowlist"
             journal = getattr(self.ctx, "journal", None)
             if journal is not None:  # a refusal nobody can see is a refusal nobody trusts
-                journal.record("brief.deny", tool=tool_name, reason=reason)
+                journal.record("brief.deny", tool=tool_name, agent=agent, reason=reason)
             return False, reason
         if tool_name in READ_ONLY_TOOLS:
             self.allowed.append(tool_name)
@@ -166,7 +183,9 @@ class GateBridge:
             return False, "no approval gate wired — denying"
 
         reversible, risk = classify_tool_call(tool_name, input_data)
-        detail = {"tool": tool_name}
+        detail: dict[str, Any] = {"tool": tool_name}
+        if agent:
+            detail["agent"] = agent
         if tool_name == "Bash":
             detail["command"] = str(input_data.get("command", ""))[:200]
         elif "file_path" in input_data:
@@ -176,7 +195,7 @@ class GateBridge:
         # performs the action. Submitting still journals the decision.
         result = gate.submit(
             Proposal(
-                action=f"agent tool call: {tool_name}",
+                action=f"{who} tool call: {tool_name}",
                 commit=None,
                 reversible=reversible,
                 risk=risk,
@@ -192,7 +211,12 @@ class GateBridge:
 
         async def pre_tool_use(hook_input, tool_use_id, context):  # noqa: ANN001 - SDK contract
             approved, reason = self.decide(
-                hook_input.get("tool_name", ""), hook_input.get("tool_input") or {}
+                hook_input.get("tool_name", ""),
+                hook_input.get("tool_input") or {},
+                # Present only when the call came from inside a Task-spawned
+                # subagent. Verified live: subagent calls do fire this hook, so a
+                # brief cannot delegate its way around DryRun.
+                agent=hook_input.get("agent_type"),
             )
             return {
                 "hookSpecificOutput": {
@@ -203,6 +227,23 @@ class GateBridge:
             }
 
         return pre_tool_use
+
+
+def _roster_error(spec: "BriefSpec") -> str:
+    """Why this brief cannot do what it says, or ``""`` if it can.
+
+    Found live: `ReviewedSwarm` listed "Task" as its delegation tool, but the
+    installed CLI names it "Agent", so the gate denied the one call the brief
+    existed to make. It still scored 1.0 — as a solo run wearing a swarm's name,
+    which is worse than a failure, because the policy learns the wrong thing.
+    """
+    if spec.agents and not (set(spec.allowed_tools) & DELEGATION_TOOLS):
+        return (
+            f"brief declares subagents {sorted(spec.agents)} but its tool allowlist "
+            f"has no delegation tool (one of {sorted(DELEGATION_TOOLS)}), so it can "
+            "never reach them"
+        )
+    return ""
 
 
 @dataclass
@@ -235,6 +276,7 @@ class AgentRun:
     # What the SDK itself counted as denied — an independent check on our own
     # tally, so a gate that silently stopped firing shows up as a mismatch.
     sdk_denials: int = 0
+    models: list[str] = field(default_factory=list)
     error: str = ""
 
 
@@ -305,11 +347,22 @@ def _sdk_runner(brief: str, spec: BriefSpec, bridge: GateBridge | None, ws: "Age
                 elif hasattr(block, "text"):
                     run.text = getattr(block, "text", "")
             if hasattr(message, "total_cost_usd"):  # the ResultMessage
+                # A call can emit more than one result; the last carries the
+                # running total for the whole call, so overwrite, never sum.
                 run.cost_usd = float(getattr(message, "total_cost_usd", None) or 0.0)
-                usage = getattr(message, "usage", None) or {}
-                if isinstance(usage, dict):
-                    run.input_tokens = int(usage.get("input_tokens", 0) or 0)
-                    run.output_tokens = int(usage.get("output_tokens", 0) or 0)
+                # Tokens come from model_usage for the same reason cost does:
+                # `usage` covers only the top-level loop. A live ReviewedSwarm run
+                # reported usage out:512 against model_usage out:5388.
+                model_usage = getattr(message, "model_usage", None) or {}
+                if model_usage:
+                    run.models = sorted(model_usage)
+                    run.input_tokens = sum(int(u.get("inputTokens", 0) or 0) for u in model_usage.values())
+                    run.output_tokens = sum(int(u.get("outputTokens", 0) or 0) for u in model_usage.values())
+                else:
+                    usage = getattr(message, "usage", None) or {}
+                    if isinstance(usage, dict):
+                        run.input_tokens = int(usage.get("input_tokens", 0) or 0)
+                        run.output_tokens = int(usage.get("output_tokens", 0) or 0)
                 run.sdk_denials = len(getattr(message, "permission_denials", None) or [])
 
     try:
@@ -428,6 +481,9 @@ class BriefTactic(Tactic):
         return str(ctx.task.description if ctx.task is not None else ctx.goal.description)
 
     def execute(self, ctx: Any) -> Outcome:
+        broken = _roster_error(self.spec)
+        if broken:  # never spend money on a brief that cannot do its job
+            return Outcome(success=False, reward=0.0, notes=f"misconfigured brief: {broken}")
         bridge = GateBridge(ctx, self.spec.allowed_tools)
         before_snapshot = ctx.target.snapshot()
         before_files = set(ctx.target.changed_files())
@@ -439,6 +495,7 @@ class BriefTactic(Tactic):
             "cost_usd": round(cost, 4),
             "input_tokens": run.input_tokens,
             "output_tokens": run.output_tokens,
+            "models": len(run.models),
         }
 
         journal = getattr(ctx, "journal", None)
@@ -529,7 +586,7 @@ class ReviewedSwarm(BriefTactic):
             "delegate to the code-reviewer subagent and address what it finds before "
             "you finish."
         ),
-        allowed_tools=("Read", "Grep", "Glob", "Edit", "Write", "Bash", "Task"),
+        allowed_tools=("Read", "Grep", "Glob", "Edit", "Write", "Bash", *sorted(DELEGATION_TOOLS)),
         agents={
             "code-reviewer": {
                 "description": "Reviews a working-tree diff for bugs and missed cases.",

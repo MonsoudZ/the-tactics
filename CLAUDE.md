@@ -122,6 +122,7 @@ precisely this framework. So don't compete with the harness; govern it.
 | `BriefTactic` | a brief *is* a tactic (system prompt + tool allowlist + subagent roster) | Brief shapes compete and the policy learns which wins where. `SingleAgentNarrow` · `WriteTestFirst` · `PlanThenPatch` · `ReviewedSwarm`. |
 | `GateBridge` | `ctx.gate` → the SDK's **PreToolUse hook** | Every write, Bash command, and unknown tool is classified and decided by *our* gate and lands in *our* journal. `DryRun` = a colony that cannot write a byte. |
 | `Outcome.cost` | `ResultMessage.total_cost_usd` | `Budget(max_cost=5.00)` is a real dollar ceiling on an autonomous swarm. |
+| journal attribution | PreToolUse `agent_type` | A swarm's audit trail says *which ant* asked — "code-reviewer subagent tool call: Bash". |
 
 **Never send the brief's roster as the SDK's `allowed_tools`, and never gate
 through `can_use_tool`.** `allowed_tools` *grants* permission: a whole-tool entry
@@ -145,6 +146,18 @@ confident summary over an empty diff is the exact failure this guards. Efficienc
 lives on `cost`, not `reward`. `max_workers=1` is the default because parallel
 ants would be parallel agents editing one working tree; give each its own git
 worktree before raising it.
+
+**Subagents (verified live).** The PreToolUse hook fires *inside* subagents too,
+carrying `agent_type` — so a brief cannot delegate its way around the gate, and
+delegation itself (`Agent`, older name `Task`) is correctly classified read-only:
+what the delegate then does is gated call by call. Token counts come from
+`model_usage`, never `usage`, for the same reason cost does — a live swarm run
+reported `usage` out:191 against an actual 3512. A call can emit more than one
+`ResultMessage`; each later one carries the running total for the whole call, so
+take the last and never sum. `BriefSpec.agents` without a delegation tool in
+`allowed_tools` is refused before spending: that exact mismatch (roster said
+`Task`, CLI wanted `Agent`) made `ReviewedSwarm` run solo while still scoring
+1.0 — a wrong label on real statistics, which is worse than a failure.
 
 ## How to add a new domain (a "playbook")
 
@@ -208,9 +221,11 @@ python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code a
   *our* check rather than the agent's. That first run also found three real bugs
   (allowed-tools shadowing, `type`-field block parsing, absolute-dirtiness reward),
   each now covered by a regression test that fails against the pre-fix code.
-  Still unexercised: `agents=` subagent rosters (`ReviewedSwarm`) and `max_turns`
-  have never run live — `ReviewedSwarm` is the one whose cost accounting most
-  depends on `total_cost_usd` being right.
+  `ReviewedSwarm` is now live too, and found three more (delegation tool named
+  `Agent` not `Task`, `usage` undercounting subagent tokens ~18x, multiple result
+  messages) — all covered by tests. Under `DryRun` with a delegate-first brief:
+  21 hook firings, 6 of them inside the subagent, 15 denied, 0 bytes written.
+  Still unexercised: `max_turns`, and parallel `max_workers > 1`.
 - **The single `Agent` loop isolates tactic errors but not `observe()`/goal-predicate
   errors.** The `Colony` (the production path) isolates everything. Keep `Target.observe`
   and `Goal.is_satisfied` total/non-throwing.
