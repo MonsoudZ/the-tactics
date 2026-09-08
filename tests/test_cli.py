@@ -251,6 +251,80 @@ def test_no_such_warning_when_the_repo_ignores_its_artifacts(tmp_path, capsys):
     assert "no .gitignore" not in capsys.readouterr().err
 
 
+# --- the archive does not grow forever ----------------------------------------
+
+
+def _fake_archives(repo, count, *, first=1):
+    """Run directories as the CLI names them: UTC stamp, so name order is time order."""
+    root = pathlib.Path(repo, ".tactics", "patches")
+    made = []
+    for i in range(first, first + count):
+        run = root / f"20250101T{i:02d}0000Z-{1000 + i}"
+        run.mkdir(parents=True)
+        (run / "001-Brief.patch").write_text(f"patch {i}\n")
+        made.append(run)
+    return made
+
+
+def test_old_archives_are_pruned_to_the_keep_limit(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    old = _fake_archives(repo, 6)
+    main([repo, "t", "--check", "test -f work.txt", "--no-learn", "--yes",
+          "--keep-runs", "3"], runner=_runner())
+
+    survivors = sorted(p.name for p in pathlib.Path(repo, ".tactics", "patches").iterdir())
+    assert all(not p.exists() for p in old[:3])     # the three oldest, by stamp
+    assert all(p.exists() for p in old[3:])
+    assert len(survivors) == 4          # the three kept, plus this run's own
+    assert "pruned 3 patch archive(s), keeping the last 3" in capsys.readouterr().out
+
+
+def test_this_runs_own_archive_is_never_the_one_pruned(tmp_path):
+    repo = _repo(tmp_path)
+    _fake_archives(repo, 5)
+    main([repo, "t", "--check", "test -f work.txt", "--no-learn", "--yes",
+          "--keep-runs", "1"], runner=_runner())
+
+    kept = sorted(pathlib.Path(repo, ".tactics", "patches").iterdir())
+    assert len(kept) == 2                                   # one old, one new
+    assert "work.txt" in sorted(kept[-1].glob("*.patch"))[0].read_text()
+
+
+def test_nothing_is_pruned_from_a_directory_you_named(tmp_path, capsys):
+    # A --patch-dir you chose is yours. That is how "keep everything" is spelled.
+    repo = _repo(tmp_path)
+    mine = tmp_path / "mine"
+    (mine / "an-old-run").mkdir(parents=True)
+    main(_argv(repo, "--yes", "--patch-dir", str(mine), "--keep-runs", "1"),
+         runner=_runner())
+    assert (mine / "an-old-run").exists()
+    assert "patch archive(s), keeping" not in capsys.readouterr().out
+
+
+def test_nothing_is_said_when_there_is_nothing_to_prune(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    _fake_archives(repo, 2)
+    main([repo, "t", "--check", "test -f work.txt", "--no-learn", "--yes"],
+         runner=_runner())
+    assert "patch archive(s), keeping" not in capsys.readouterr().out
+
+
+def test_a_stray_file_in_the_archive_is_left_alone(tmp_path):
+    repo = _repo(tmp_path)
+    _fake_archives(repo, 3)
+    note = pathlib.Path(repo, ".tactics", "patches", "README.txt")
+    note.write_text("mine\n")
+    main([repo, "t", "--check", "test -f work.txt", "--no-learn", "--yes",
+          "--keep-runs", "1"], runner=_runner())
+    assert note.read_text() == "mine\n"
+
+
+def test_keeping_zero_runs_is_refused(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    assert main(_argv(repo, "--keep-runs", "0"), runner=_runner()) == 2
+    assert "--keep-runs must be at least 1" in capsys.readouterr().err
+
+
 # --- .tactics/ is two different things ----------------------------------------
 
 

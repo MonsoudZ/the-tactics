@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -185,7 +186,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="skip the scribe; run without distilling lessons afterwards")
     p.add_argument("--patch-dir", default=None, metavar="DIR",
                    help="where to archive each patch as it is produced "
-                        "(default: <repo>/.tactics/patches/<run>)")
+                        "(default: <repo>/.tactics/patches/<run>); a directory "
+                        "you name here is never pruned")
+    p.add_argument("--keep-runs", type=int, default=20, metavar="N",
+                   help="how many runs of patch archive to keep (default: 20)")
     return p
 
 
@@ -282,6 +286,24 @@ def _patch_dir(args, repo: str) -> str:  # noqa: ANN001
     return os.path.join(repo, ".tactics", "patches", stamp)
 
 
+def _prune_patch_archives(root: str, keep: int) -> list[str]:
+    """Drop all but the ``keep`` most recent run directories under ``root``.
+
+    One directory per run, forever, is a slow leak into the repository. Only the
+    archive the CLI manages is pruned, and the run names are UTC stamps so the
+    order is the name order. "Keep everything" is spelled by naming your own
+    ``--patch-dir``: a directory you chose is never deleted from.
+    """
+    try:
+        runs = sorted(entry.path for entry in os.scandir(root) if entry.is_dir())
+    except OSError:                 # no archive yet, or not ours to read
+        return []
+    doomed = runs[:-keep]
+    for path in doomed:
+        shutil.rmtree(path, ignore_errors=True)
+    return [p for p in doomed if not os.path.exists(p)]
+
+
 def main(argv: list[str] | None = None, *, runner=None) -> int:  # noqa: ANN001
     args = build_parser().parse_args(argv)
     repo = os.path.abspath(os.path.expanduser(args.repo))
@@ -289,6 +311,10 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:  # noqa: ANN001
     problem = _check_repo(repo)
     if problem:
         print(f"tactics: {problem}", file=sys.stderr)
+        return 2
+    if args.keep_runs < 1:
+        print("tactics: --keep-runs must be at least 1 — the run about to start "
+              "needs somewhere to put its patches", file=sys.stderr)
         return 2
 
     check = shlex.split(args.check)
@@ -300,8 +326,12 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:  # noqa: ANN001
             else AutoApprove() if args.yes
             else PolicyGate(escalate=_ask, allow_risk=_ROUTINE))
 
+    patch_dir = _patch_dir(args, repo)
+    pruned = ([] if args.patch_dir
+              else _prune_patch_archives(os.path.dirname(patch_dir), args.keep_runs))
+
     workspace = AgentWorkspace(repo, check=check, isolate=True, runner=runner,
-                               model=args.model, patch_dir=_patch_dir(args, repo))
+                               model=args.model, patch_dir=patch_dir)
     reaped = workspace.reap_abandoned_worktrees()
     if not args.no_persist:
         _prepare_tactics_dir(repo)
@@ -326,6 +356,10 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:  # noqa: ANN001
         print(f"warning {warning}", file=sys.stderr)
     if reaped:
         print(f"cleaned up {len(reaped)} worktree(s) abandoned by an earlier run")
+    if pruned:
+        # Said out loud rather than done quietly: these are files the last report
+        # named, and the retention is only discoverable if it announces itself.
+        print(f"pruned {len(pruned)} patch archive(s), keeping the last {args.keep_runs}")
     print()
 
     client, why = (None, "disabled") if args.no_learn else _scribe_client()

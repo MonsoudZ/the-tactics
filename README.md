@@ -53,7 +53,9 @@ deliberately untruncated.
 Each patch is written to `<repo>/.tactics/patches/<run>/` the moment it is
 lifted out, *before* its worktree is destroyed — so a run that is interrupted,
 crashes, or dies on its budget still leaves its candidates on disk, ready for
-`git apply --3way`. `--patch-dir` puts them somewhere else.
+`git apply --3way`. The last 20 runs are kept (`--keep-runs`), and older ones
+are pruned with a line saying so. `--patch-dir` puts them somewhere else — and
+a directory you name yourself is never pruned.
 
 What lands in your repository is `.tactics/`: numeric memory, lessons, and the
 patch archive. The archive ignores itself, so `git add .tactics` commits what

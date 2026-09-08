@@ -235,7 +235,12 @@ run its own (`<repo>/.tactics/patches/<stamp>`, or a temp dir under
 `--no-persist` — that flag means *do not write your repo*, not *throw the work
 away*), never clobbers an existing file, and is fail-soft: an unwritable archive
 costs the copy, never the patch, and `saved_to` stays empty so the report can
-say so rather than imply a file exists.
+say so rather than imply a file exists. One directory per run forever is a slow
+leak, so the CLI keeps the last `--keep-runs` (default 20) and says out loud
+what it deleted — these are files the previous report named by path, and a
+retention nobody announces is one nobody knows about. It prunes only the archive
+it manages: a `--patch-dir` you named is never deleted from, which is how "keep
+everything" is spelled.
 
 **And the leavings are reaped** (verified live). A killed run's worktrees are
 both registered and on disk, which is exactly the case `git worktree prune`
