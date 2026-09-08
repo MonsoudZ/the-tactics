@@ -37,6 +37,7 @@ import tempfile
 import time
 from typing import Any
 
+from . import __version__
 from .core.approval import AutoApprove, DryRun, PolicyGate
 from .core.budget import Budget
 from .playbooks.agent_sdk import (
@@ -157,6 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Your repository is never written to unless you pass --apply.",
     )
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("repo", help="path to the git repository to work on")
     p.add_argument("task", help="what you want done, in a sentence")
     p.add_argument("--check", default="pytest -q",

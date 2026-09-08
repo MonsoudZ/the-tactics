@@ -253,6 +253,15 @@ def test_yes_and_dry_run_cannot_both_be_asked_for():
         build_parser().parse_args(["r", "t", "--yes", "--dry-run"])
 
 
+def test_version_prints_and_exits_zero_without_needing_repo_or_task(capsys):
+    from tactics import __version__
+
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["--version"])
+    assert exc.value.code == 0
+    assert __version__ in capsys.readouterr().out
+
+
 def test_it_warns_when_a_repo_has_no_gitignore(tmp_path, capsys):
     # Found live: with no .gitignore, an agent that ran the tests itself put
     # .pyc files in its own patch, and the patch then would not apply.

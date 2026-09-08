@@ -492,6 +492,19 @@ tactics <repo> "<task>" --check "..."  # the front door: point the brain at any 
   reached the model, so its failure is an answer about this task, and only a
   run that cost nothing gets called a broken environment. The turn limit also
   gets its own hint naming the current value.
+  **Pointed at its own repository, it found two more.** The `src/` warning's own
+  remedy could not be followed — `--check 'PYTHONPATH=$PWD/src pytest -q'` needs
+  a shell, and the check is `shlex.split` and run without one, so `argv[0]` was
+  the assignment and every check died with "command not found". (The trap it
+  warns about is real here: in a fresh worktree plain `pytest` imports the main
+  tree's `src`.) And with three agents all hitting `--max-turns 15` *after*
+  writing patches the check then verified, the report announced "every agent
+  failed part-way through its run" directly above three passing verdicts — an
+  error is how a run ended, not a verdict on what it produced. The run's own
+  `--version` patch was landed from the patch archive, re-verified against a
+  HEAD that had moved two commits since: the first agent-authored change in
+  this repository, and the archive doing exactly what it exists for.
+
 - **The single `Agent` loop isolates tactic errors but not `observe()`/goal-predicate
   errors.** The `Colony` (the production path) isolates everything. Keep `Target.observe`
   and `Goal.is_satisfied` total/non-throwing.
