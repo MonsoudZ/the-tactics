@@ -46,9 +46,6 @@ class Budget:
     def elapsed(self) -> float:
         return 0.0 if self._start is None else self.clock() - self._start
 
-    def remaining_cost(self) -> float | None:
-        return None if self.max_cost is None else self.max_cost - self._spent
-
     def over_cost(self) -> bool:
         return self.max_cost is not None and self._spent >= self.max_cost
 

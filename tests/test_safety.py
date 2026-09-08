@@ -121,16 +121,6 @@ def test_budget_attempts_cap_fails_a_stuck_task():
     assert result.journal.of_kind("task.gaveup")
 
 
-def test_budget_remaining_cost():
-    b = Budget(max_cost=5.0)
-    assert b.remaining_cost() == 5.0
-    b.spend(2.0)
-    assert b.remaining_cost() == 3.0
-    b.spend(10.0)
-    assert b.remaining_cost() == -7.0
-    assert Budget().remaining_cost() is None
-
-
 # --- approval gate -----------------------------------------------------------
 
 
