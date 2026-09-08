@@ -49,6 +49,7 @@ from .core.lessons import (
 from .core.memory import (
     Entry,
     InMemoryStore,
+    JsonRecencyStore,
     JsonStore,
     MemoryStore,
     RecencyStore,
@@ -85,6 +86,7 @@ __all__ = [
     "JsonlLessons",
     "Lesson",
     "LessonStore",
+    "JsonRecencyStore",
     "JsonStore",
     "load_env",
     "render_lessons",

@@ -347,3 +347,45 @@ def test_begin_round_is_a_no_op_on_a_plain_policy():
 
     UCBPolicy().begin_round()
     EpsilonGreedyPolicy().begin_round()
+
+
+# --- persistent recency: the two halves markets need at once ------------------
+
+
+def test_a_persistent_recency_store_decays_and_survives_restart(tmp_path):
+    from tactics import JsonRecencyStore
+
+    path = str(tmp_path / "mem.json")
+    store = JsonRecencyStore(path, decay=0.5)
+    for _ in range(3):
+        store.record("t", "sig", reward=1.0, success=True)
+
+    reopened = JsonRecencyStore(path, decay=0.5)          # a fresh process
+    assert reopened.stats("t", "sig").trials == store.stats("t", "sig").trials
+    assert reopened.stats("t", "sig").mean_reward == store.stats("t", "sig").mean_reward
+
+
+def test_old_experience_fades_where_a_plain_json_store_would_hoard_it(tmp_path):
+    from tactics import JsonRecencyStore, JsonStore
+
+    fading = JsonRecencyStore(str(tmp_path / "r.json"), decay=0.5)
+    hoarding = JsonStore(str(tmp_path / "j.json"))
+    for store in (fading, hoarding):
+        for _ in range(10):                      # the old regime: this worked
+            store.record("t", "sig", reward=1.0, success=True)
+        for _ in range(3):                       # the regime turned
+            store.record("t", "sig", reward=0.0, success=False)
+
+    # The recency store has largely moved on; the plain one is still anchored.
+    assert fading.stats("t", "sig").mean_reward < 0.2
+    assert hoarding.stats("t", "sig").mean_reward > 0.7
+
+
+def test_reopening_with_a_different_decay_governs_from_then_on(tmp_path):
+    from tactics import JsonRecencyStore
+
+    path = str(tmp_path / "m.json")
+    JsonRecencyStore(path, decay=0.9).record("t", "sig", reward=1.0, success=True)
+    reopened = JsonRecencyStore(path, decay=0.1)   # decay is config, not data
+    assert reopened.decay == 0.1
+    assert reopened.stats("t", "sig").total_reward == 1.0   # what was written stands

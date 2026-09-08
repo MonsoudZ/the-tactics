@@ -144,11 +144,16 @@ class RecencyStore(InMemoryStore):
             self._meta[signature] = (features or {}, goal)
 
 
-class JsonStore(InMemoryStore):
-    """Persistent store backed by a JSON file. Experience survives restarts."""
+class _JsonBacked:
+    """Mixin: persist a store's table to a JSON file, atomically, on every record.
 
-    def __init__(self, path: str) -> None:
-        super().__init__()
+    Kept separate from the store it wraps so persistence and *how stats are
+    updated* stay orthogonal — which is what lets a recency-weighted store be
+    persistent without either one knowing about the other.
+    """
+
+    def __init__(self, path: str, *args: Any, **kw: Any) -> None:
+        super().__init__(*args, **kw)
         self.path = path
         self._load()
 
@@ -188,3 +193,26 @@ class JsonStore(InMemoryStore):
     def record(self, tactic_name: str, signature: str, **kw: Any) -> None:
         super().record(tactic_name, signature, **kw)
         self._flush()
+
+
+class JsonStore(_JsonBacked, InMemoryStore):
+    """Persistent store backed by a JSON file. Experience survives restarts."""
+
+
+class JsonRecencyStore(_JsonBacked, RecencyStore):
+    """Persistent *and* recency-weighted — for worlds that are both.
+
+    A market is non-stationary (what worked last quarter may be actively wrong
+    now) and long-running (the process restarts, the experience should not).
+    Either store alone forces a bad trade: `JsonStore` remembers a regime that
+    has ended, `RecencyStore` forgets everything when the process dies.
+
+    ``decay`` is configuration rather than data, so it is not written to the
+    file: reopen with a different decay and it governs from that point on.
+
+    Note the decay is per *observation*, not per unit of time — a store left
+    idle for a month reloads at full weight. Time-based decay is the right model
+    for a market that moved while you were not looking, and is not implemented.
+    """
+
+

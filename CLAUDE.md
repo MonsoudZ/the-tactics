@@ -108,6 +108,27 @@ Rules: the scribe records only specific, actionable, evidence-backed insights �
 an empty list is a valid answer. Relevance is playbook/goal match + keyword
 overlap + recency; keep lesson text short and concrete so matching works.
 
+### The trading playbook (v0.7) — `playbooks/trading.py`, money on the line
+
+The domain that makes every safety rule load-bearing at once, and the first one
+where a mistake does not come back.
+
+| Decision | Why it is that way |
+|----------|--------------------|
+| A tactic returns an **intention**; `TradingTactic.execute` is the only thing that turns one into an order, through `ctx.gate` | A subclass cannot fill around the gate even by accident. Orders propose as `reversible=False, risk="high"` — it is money. |
+| **Reward is benchmark-relative**: the account's return minus an equal-weight buy-and-hold of the same symbols | Raw equity change is mostly the market. In a rising market every tactic looks brilliant, and the policy learns only that bulls are nice. Excess return measures the *decision*. It also lets `StandAside` earn a positive score for holding cash through a decline — a move raw P&L cannot express. |
+| **The posture follows the broker**: simulated fills auto-approve, anything else defaults to `DryRun` | A backtest that needs a human per order is not a backtest; a live venue that trades without one is a liability. The safe default is the one for the case nobody thought about. |
+| `RiskLimits` wraps the posture rather than replacing it | Two questions, kept apart: *is this within the limits we set* and *is it approved*. A breach is refused even under `AutoApprove`; `max_drawdown` measures against the high-water mark, so a strategy that already lost too much stops rather than trading back. |
+| **The `Agent`, not the `Colony`** | There is no git worktree for a brokerage account. Two ants on one account interleave into a position neither chose. Decisions are serial. |
+| `SimilarityEstimator` by default | Regime features change most bars, so under exact matching almost every step is unseen, UCB explores instead of comparing, and the first tactic in the list wins forever. Measured: 290 identical choices in a 290-step run. |
+| `walk_forward`, not one long run | `DiscountedReturn` writes nothing until an episode ends — it cannot know a return before then. A single long `pursue` therefore consults an empty memory every step and learns nothing *while* it runs. The episode is the unit of learning, so the harness makes episodes and shares memory across them. Walking forward is also the honest evaluation: each episode is scored on bars the policy had not seen. |
+
+`PaperBroker` is a test instrument, not a market simulator: no partial fills, no
+queue position, no gaps, no slippage beyond the fee. A strategy that only looks
+good here has been measured against a kinder world than the real one. **No live
+broker has ever been run against this code**, and the `Broker` protocol is the
+only place one would go.
+
 ### The execution layer (v0.6) — the Agent SDK as a Target (`playbooks/agent_sdk.py`)
 
 The **Claude Agent SDK** (`pip install claude-agent-sdk`) is Claude Code as a
@@ -258,13 +279,16 @@ python3 examples/swarm_demo.py         # see the colony swarm, verify, reinforce
 python3 examples/safety_demo.py        # see budgets, the approval gate, the journal
 python3 examples/llm_demo.py           # LLM tactics + LLM critic (offline, scripted)
 python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code agent (offline)
+python3 examples/trading_demo.py       # gated orders, risk limits, walk-forward (offline, no broker)
 ```
 
 ## Known limitations (audited, accepted for now)
 
-- **Recency + persistence don't combine yet.** `RecencyStore` is in-memory only;
-  `JsonStore` doesn't decay. Trading (non-stationary *and* persistent) will want
-  a persistent recency store — build it with the trading playbook.
+- **Recency + persistence now combine.** `JsonRecencyStore` is both, via a
+  `_JsonBacked` mixin so persistence and how-stats-update stay orthogonal. Decay
+  is per *observation*, not per unit of time — a store idle for a month reloads
+  at full weight, which is the wrong model for a market that moved while nobody
+  was looking. Time-based decay is not implemented.
 - **`JsonStore` flushes on every `record`.** Atomic and safe, but O(n) per write;
   fine for thousands of entries, revisit for very large memories.
 - **`ScriptedClient` isn't thread-safe** (its response index races). It's a
@@ -378,7 +402,10 @@ python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code a
       spread across briefs, and `ApplyBestPatch` chooses among the candidates.
       Verified end to end on a repo whose failures repeat: the scribe records
       the recurring cause and future briefs start carrying it.
-- [ ] Playbook: trading — alerts, shift/buy/sell against a goal.
+- [x] Playbook: trading — gated orders, benchmark-relative reward, risk limits,
+      walk-forward episodes, persistent recency memory (`playbooks/trading.py`).
+      Paper only: the `Broker` seam has never been pointed at a live venue, and
+      the defaults refuse to trade one without you saying so explicitly.
 - [x] Playbook: lead-finder — score bad sites, draft + send outreach (`playbooks/lead_finder.py`, dry-run by default).
 - [ ] Playbook: gift-cards — production-readiness checks.
 
