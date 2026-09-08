@@ -186,6 +186,13 @@ silently measure the wrong thing: a `src/` layout with no pythonpath, and a repo
 with no `.gitignore`. Verified end to end on a red repo: 2 agents, 1 verified
 patch, landed, suite green.
 
+The report says what the *check* found, not what the agent claimed: a live run
+listed a candidate patch adding two unused helpers as though it worked, because
+the output named the patch and never named the verdict. So the `verify` journal
+events are printed per ant. `--show-diff` prints each candidate in full and does
+not truncate — the worktree that produced it is gone by then, so the terminal
+holds the only copy.
+
 **Fan-out (verified live: 3 agents, 62s, 3 *distinct* patches, main repo
 untouched).** Set `AgentWorkspace(isolate=True)` and `max_workers > 1`; the
 unsafe combination is refused, not warned about. `spread=True` (the default)

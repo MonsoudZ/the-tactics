@@ -35,11 +35,21 @@ posture AutoApprove   agents 2   budget $5.00
   SingleAgentNarrow  $0.0554  0 file(s)
   WriteTestFirst     $0.0773  1 file(s)
 
+verification (your check, re-run against each agent's own tree):
+  SingleAgentNarrow  check still fails after the run
+  WriteTestFirst     check re-run confirms the fix
+
 1 candidate patch(es); your repository is untouched
   from WriteTestFirst     22 diff lines  ['tests/conftest.py']
 
 apply: landed WriteTestFirst (smallest verified diff)
 ```
+
+A candidate is not an answer: the verification line says whether your check
+actually passed, because a listed patch with a confident summary behind it is
+the exact failure this guards. `--show-diff` prints each candidate in full and
+deliberately untruncated — the worktree that produced it is destroyed when the
+run ends, so what is on screen is the only copy there is.
 
 Three postures, and the default is the careful one: agents edit and run commands
 freely inside their own worktrees, but anything irreversible — a push, an

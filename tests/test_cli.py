@@ -195,15 +195,24 @@ def test_no_persist_leaves_nothing_behind(tmp_path):
 
 def test_the_budget_is_a_real_ceiling(tmp_path, capsys):
     repo = _repo(tmp_path)
+    calls = []
 
     def expensive(brief, spec, bridge, ws):
         run = _runner()(brief, spec, bridge, ws)
         run.cost_usd = 99.0
+        calls.append(brief)
         return run
 
-    main(_argv(repo, "--yes", "--agents", "2", "--budget", "1.00"), runner=expensive)
-    # The first run blows the ceiling, so the second never starts.
-    assert capsys.readouterr().out.count("SingleAgentNarrow") <= 2
+    # The check can never pass, so nothing but the budget can stop the rounds:
+    # a satisfied goal would end the run for the wrong reason and the ceiling
+    # would go untested (without it: 8 calls, with it: 2).
+    main([repo, "do the thing", "--check", "test -f never.txt", "--no-learn",
+          "--no-persist", "--yes", "--agents", "2", "--rounds", "4",
+          "--budget", "1.00"], runner=expensive)
+    # One round of two ants blows the $1 ceiling, so no further round starts.
+    # Asserted on the agent calls themselves, not on what the report prints.
+    assert len(calls) == 2
+    assert "$198.00 spent" in capsys.readouterr().out
 
 
 def test_yes_and_dry_run_cannot_both_be_asked_for():
@@ -226,3 +235,65 @@ def test_no_such_warning_when_the_repo_ignores_its_artifacts(tmp_path, capsys):
     subprocess.run(["git", "-C", repo, "commit", "-qm", "ignore"], check=True, capture_output=True)
     main(_argv(repo, "--dry-run"), runner=_runner())
     assert "no .gitignore" not in capsys.readouterr().err
+
+
+# --- you cannot review what you cannot see ------------------------------------
+
+
+def test_show_diff_prints_the_patch_body(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    main(_argv(repo, "--yes", "--show-diff"),
+         runner=_runner("work.txt", "a distinctive line\n"))
+    out = capsys.readouterr().out
+    assert "patch from SingleAgentNarrow" in out
+    assert "a distinctive line" in out            # the actual content, not a count
+    assert "+++ b/work.txt" in out                # and it is a real unified diff
+
+
+def test_the_diff_is_not_truncated(tmp_path, capsys):
+    # The worktree is destroyed when the run ends, so the printed copy is the
+    # only one; truncating it would lose the tail permanently.
+    body = "".join(f"line {i}\n" for i in range(300))
+    repo = _repo(tmp_path)
+    main(_argv(repo, "--yes", "--show-diff"), runner=_runner("big.txt", body))
+    out = capsys.readouterr().out
+    assert "line 0" in out and "line 299" in out
+
+
+def test_without_the_flag_only_the_summary_is_printed(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    main(_argv(repo, "--yes"), runner=_runner("work.txt", "a distinctive line\n"))
+    out = capsys.readouterr().out
+    assert "1 candidate patch" in out
+    assert "a distinctive line" not in out
+    assert "patch from" not in out
+
+
+def test_each_candidate_gets_its_own_labelled_section(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    main(_argv(repo, "--yes", "--agents", "2", "--show-diff"), runner=_runner())
+    assert capsys.readouterr().out.count("patch from") == 2
+
+
+def test_show_diff_on_a_run_that_produced_nothing_says_nothing(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    main(_argv(repo, "--dry-run", "--show-diff"), runner=_runner())
+    out = capsys.readouterr().out
+    assert "0 candidate patch" in out and "patch from" not in out
+
+
+def test_the_report_says_whether_the_check_actually_passed(tmp_path, capsys):
+    # Listing candidate patches without their verdict reads as though every one
+    # of them works — which a live run showed is not true.
+    repo = _repo(tmp_path)
+    main(_argv(repo, "--yes"), runner=_runner())
+    out = capsys.readouterr().out
+    assert "verification" in out and "confirms the fix" in out
+
+
+def test_a_patch_that_does_not_fix_anything_says_so(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    # The check looks for a file the agent never writes.
+    main([repo, "t", "--check", "test -f never.txt", "--yes", "--no-learn", "--no-persist"],
+         runner=_runner("something_else.txt"))
+    assert "still failing" in capsys.readouterr().out

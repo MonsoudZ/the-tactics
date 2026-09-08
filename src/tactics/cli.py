@@ -147,6 +147,9 @@ def build_parser() -> argparse.ArgumentParser:
                          help="approve every tool call (still inside the worktrees)")
     posture.add_argument("--dry-run", action="store_true",
                          help="propose only — the agents cannot write a byte")
+    p.add_argument("--show-diff", action="store_true",
+                   help="print each candidate patch in full — worktrees are destroyed "
+                        "when the run ends, so this is the only copy")
     p.add_argument("--apply", action="store_true",
                    help="land the best verified patch on your repository")
     p.add_argument("--no-persist", action="store_true",
@@ -216,11 +219,29 @@ def _report(args, workspace, result, lessons, client, why, gate) -> int:  # noqa
         print(f"  {e.data['tactic']:<18} ${e.data.get('cost_usd', 0):<7} "
               f"{e.data.get('changed_files', 0)} file(s)")
 
+    # Whether the check passed is the entire point, and listing candidates
+    # without it reads as though every patch works. The critic re-ran the check
+    # for each ant; say what it found.
+    verdicts = [e for e in result.journal.events if e.kind == "verify"]
+    if verdicts:
+        print("\nverification (your check, re-run against each agent's own tree):")
+        for e in verdicts:
+            print(f"  {e.data.get('tactic', '?'):<18} {e.data.get('reason', '')}")
+
     patches = workspace.patches
     print(f"\n{len(patches)} candidate patch(es); your repository is untouched")
     for patch in patches:
         print(f"  from {patch.tactic or patch.task:<18} "
               f"{len(patch.text.splitlines())} diff lines  {patch.files}")
+
+    if args.show_diff and patches:
+        # Printed in full and not truncated: the worktree that produced this is
+        # already gone, so what is on screen is the only copy there is.
+        for patch in patches:
+            title = f" patch from {patch.tactic or patch.task} "
+            print(f"\n{title:-^72}")
+            print(patch.text.rstrip() or "(empty)")
+        print("-" * 72)
 
     if client is None and not args.no_learn:
         print(f"\nno lessons distilled: {why}")
