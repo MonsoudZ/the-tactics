@@ -205,6 +205,23 @@ it. That's this framework. So don't compete with the harness; govern it.
   its work comes back as a `Patch`. `ApplyBestPatch` re-verifies every candidate
   against current HEAD and lands the winner through the gate.
 
+Both knobs are live-verified. `--agents 4` runs the whole roster at once: on a
+calibrated repair task that was 76 seconds, four *distinct* patches, all four
+verified in their own trees, the main repository untouched. And `--max-turns`
+binds hard — one run each, same repo, same brief, same model:
+
+| | files changed | outcome | cost |
+|---|---|---|---|
+| `--max-turns 1` | 0 | ran out of turns | $0.094 |
+| `--max-turns 10` | 1 | check re-run confirms the fix | $0.096 |
+
+Single runs, not rates — but the cost column is the useful part. A turn budget
+set too low buys nothing and saves nothing: the run that failed cost what the
+run that worked cost. At 10 turns every brief found the non-obvious fix
+(snapshot and restore) rather than the obvious one that breaks a second test,
+so the turn budget is the binding constraint on solution quality here — which is
+the same resource the lesson experiment above found a long lesson spending.
+
 ## Trading (`playbooks/trading.py`) — paper only
 
 The domain where a mistake doesn't come back, so the safety rules are
@@ -222,7 +239,7 @@ defaults to `DryRun`, and `RiskLimits` refuses a breach even under `AutoApprove`
 
 ```bash
 python3 -m pip install -e .
-python3 -m pytest                      # 285 tests, all green
+python3 -m pytest                      # 370 tests, all green
 python3 examples/lead_finder_demo.py   # one ant learns the winning email
 python3 examples/swarm_demo.py         # a colony hardens a service in parallel
 python3 examples/safety_demo.py        # budgets, approval gate, audit journal
@@ -320,19 +337,23 @@ Worth stating plainly, because "the tests pass" turned out to be a weak claim:
 - **Verified against the real thing.** The agent-sdk playbook has been run live
   against the Claude Agent SDK in every gate posture — including a `DryRun` swarm
   that made 21 tool calls, 6 of them inside a subagent, and wrote zero bytes.
-  Parallel fan-out, patch selection, lesson recall and the scribe are all live-verified.
-- **Found by running it, not by testing it.** Seventeen real bugs in that
+  Parallel fan-out, patch selection, lesson recall, the scribe, `--max-turns` and
+  four parallel agents are all live-verified. Every knob on the CLI has now been
+  run against a real agent.
+- **Found by running it, not by testing it.** More than twenty real bugs in that
   playbook were found by live runs while the suite was green — including a gate
-  with a silent bypass, an 18x token undercount, and a colony that marked failed
-  work complete. Keep the injectable seams *and* point them at the real thing
-  periodically; neither alone is enough.
-- **Not verified.** No live broker has ever been connected, and `max_workers`
-  above 3 is unexercised. Time-decayed memory is tested against an injected
-  clock rather than against real elapsed time.
+  with a silent bypass, an 18x token undercount, a colony that marked failed work
+  complete, and a report that called running out of turns a broken environment.
+  Keep the injectable seams *and* point them at the real thing periodically;
+  neither alone is enough.
+- **Not verified.** No live broker has ever been connected. Time-decayed memory
+  is tested against an injected clock rather than against real elapsed time, and
+  the reaper's liveness check needs POSIX advisory locks — on a platform without
+  them it reaps nothing rather than risk a live run's worktrees.
 
 ## Status
 
 Core engine, colony, trust layer, LLM layer and verbal memory are built, tested
-(285 tests), and proven to learn. Six playbooks ship: agent-sdk, trading,
+(370 tests), and proven to learn. Six playbooks ship: agent-sdk, trading,
 repo-health, focumate, lead-finder and code-review. Progress and the full
 architecture notes are in `CLAUDE.md`.
