@@ -205,6 +205,16 @@ diff included — so on an already-green repo every ant confirmed a fix that did
 not exist. A pass over an empty diff now says exactly that. The reward was
 always right; only the sentence lied.
 
+**`.tactics/` ignores the half of itself nobody should commit.** Two different
+things live there: patches are run artifacts (one per agent, per run, forever)
+and memory + lessons are what past runs on this repository learned, which a team
+may well want in git so everyone's agents start informed. So the CLI writes
+`.tactics/.gitignore` with `patches/` — from *inside* the directory, so a
+.gitignore the user maintains is never touched — and says once that the
+remaining choice is theirs. The note stops when they have made either decision,
+committing it or ignoring it, rather than nagging forever. Verified live:
+`git add .tactics` stages the memory and not the patch.
+
 **The default posture's prompt is serialized** (`_PROMPT`). `_ask` is reached
 from each ant's own thread, so with `--agents` above one and no lock several
 agents read the same stdin at once: prompts interleave and a "y" meant for one

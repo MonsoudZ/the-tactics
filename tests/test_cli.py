@@ -251,6 +251,58 @@ def test_no_such_warning_when_the_repo_ignores_its_artifacts(tmp_path, capsys):
     assert "no .gitignore" not in capsys.readouterr().err
 
 
+# --- .tactics/ is two different things ----------------------------------------
+
+
+def _persisted(repo, *extra):
+    return [repo, "do the thing", "--check", "test -f work.txt", "--no-learn", *extra]
+
+
+def test_the_patch_archive_ignores_itself(tmp_path):
+    # `git add .tactics` should pick up what past runs learned and none of the
+    # per-run artifacts, without touching a .gitignore the user maintains.
+    repo = _repo(tmp_path)
+    main(_persisted(repo, "--yes"), runner=_runner())
+
+    subprocess.run(["git", "-C", repo, "add", ".tactics"], check=True, capture_output=True)
+    tracked = subprocess.run(["git", "-C", repo, "ls-files", "--", ".tactics"],
+                             capture_output=True, text=True).stdout.split()
+    assert any(f.endswith("agent_sdk_memory.json") for f in tracked)
+    assert not any(f.endswith(".patch") for f in tracked)
+    assert not pathlib.Path(repo, ".gitignore").exists()   # theirs, untouched
+
+
+def test_the_note_explains_the_choice_while_it_is_still_open(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    main(_persisted(repo, "--yes"), runner=_runner())
+    out = capsys.readouterr().out
+    assert ".tactics/ holds this repo's memory and lessons" in out
+
+
+def test_no_note_once_the_user_has_ignored_it(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    pathlib.Path(repo, ".gitignore").write_text(".tactics/\n")
+    main(_persisted(repo, "--yes"), runner=_runner())
+    assert ".tactics/ holds" not in capsys.readouterr().out
+
+
+def test_no_note_once_the_user_has_committed_it(tmp_path, capsys):
+    # Committing is the other way of having decided, and is equally not nagging.
+    repo = _repo(tmp_path)
+    main(_persisted(repo, "--yes"), runner=_runner())
+    capsys.readouterr()
+    subprocess.run(["git", "-C", repo, "add", ".tactics"], check=True, capture_output=True)
+    main(_persisted(repo, "--yes"), runner=_runner())
+    assert ".tactics/ holds" not in capsys.readouterr().out
+
+
+def test_no_persist_writes_no_gitignore_either(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    main(_argv(repo, "--yes"), runner=_runner())
+    assert not pathlib.Path(repo, ".tactics").exists()
+    assert ".tactics/ holds" not in capsys.readouterr().out
+
+
 # --- the gate has to be askable ------------------------------------------------
 
 

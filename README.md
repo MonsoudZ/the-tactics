@@ -55,6 +55,11 @@ lifted out, *before* its worktree is destroyed — so a run that is interrupted,
 crashes, or dies on its budget still leaves its candidates on disk, ready for
 `git apply --3way`. `--patch-dir` puts them somewhere else.
 
+What lands in your repository is `.tactics/`: numeric memory, lessons, and the
+patch archive. The archive ignores itself, so `git add .tactics` commits what
+past runs learned — worth sharing with a team — and none of the per-run
+artifacts. Your own `.gitignore` is never edited.
+
 Nor does an interrupted run leave a pile of checkouts in your temp directory:
 Ctrl-C and `kill` unwind and clean up after themselves, and worktrees left by
 something that could not be caught — `kill -9`, a lost machine — are reaped at

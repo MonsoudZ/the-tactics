@@ -189,6 +189,46 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _prepare_tactics_dir(repo: str) -> None:
+    """Make `.tactics/` ignore the part of itself nobody should ever commit.
+
+    Two different things live in there. Patches are run artifacts — one per
+    agent, per run, forever — and committing them is never right. Memory and
+    lessons are what past runs on this repository learned, and a team may very
+    well want those in git so everyone's agents start informed. So the archive
+    is ignored from inside the directory, which needs no change to a .gitignore
+    the user maintains, and the interesting choice is left to them.
+    """
+    marker = os.path.join(repo, ".tactics", ".gitignore")
+    if os.path.exists(marker):
+        return
+    try:
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        with open(marker, "w", encoding="utf-8") as fh:
+            fh.write("# Written by tactics.\n"
+                     "# Patches are run artifacts and are never worth committing.\n"
+                     "# The memory and lessons beside them may well be: they are what\n"
+                     "# past runs on this repository learned.\n"
+                     "patches/\n")
+    except OSError:         # a read-only repo is the user's business, not a crash
+        pass
+
+
+def _tactics_dir_status(repo: str) -> str:
+    """Whether the user has decided about `.tactics/` yet: ignored, tracked, loose."""
+    def git(*args: str):
+        return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
+
+    try:
+        if git("check-ignore", "-q", ".tactics").returncode == 0:
+            return "ignored"
+        if git("ls-files", "--", ".tactics").stdout.strip():
+            return "tracked"
+    except OSError:         # pragma: no cover - no git on PATH is caught earlier
+        return "ignored"
+    return "loose"
+
+
 def _diagnose(errors: list[str]) -> str:
     """Turn the agent's error into the thing to actually do about it, if we can."""
     joined = " ".join(errors).lower()
@@ -263,6 +303,8 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:  # noqa: ANN001
     workspace = AgentWorkspace(repo, check=check, isolate=True, runner=runner,
                                model=args.model, patch_dir=_patch_dir(args, repo))
     reaped = workspace.reap_abandoned_worktrees()
+    if not args.no_persist:
+        _prepare_tactics_dir(repo)
     colony = build_delivery_colony(
         workspace,
         gate=gate,
@@ -365,6 +407,11 @@ def _report(args, workspace, result, lessons, client, why, gate) -> int:  # noqa
 
     if runs and len(failures) == len(runs):
         return 2                      # nothing ran; distinct from "ran, found nothing"
+
+    if not args.no_persist and _tactics_dir_status(workspace.path) == "loose":
+        print("\nnote: .tactics/ holds this repo's memory and lessons (its patch "
+              "archive is\n      already ignored). Commit it to share what runs "
+              "learn, or add\n      .tactics/ to .gitignore to keep it to yourself.")
 
     if not patches:
         print("\nnothing to apply.")
