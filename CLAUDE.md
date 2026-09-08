@@ -193,6 +193,22 @@ Reward is 1.0 only when the check passes *and* the diff is non-empty — a
 confident summary over an empty diff is the exact failure this guards. Efficiency
 lives on `cost`, not `reward`.
 
+**On a green repo that is not enough, and `proves_itself` is the answer.** When
+the check already passes, "it passes after the run" means only that nothing
+broke — and for feature work the agent writes the test that grades its own work,
+so *reward is measured, never self-reported* quietly stops being true exactly
+where the tool gets used most. (The `--version` patch landed on that basis. It
+was fine. That was luck.) So each candidate's **test files alone** are applied to
+a clean checkout of HEAD and the check is run: it must **fail**. A test that goes
+red without the implementation was measuring the implementation; one that stays
+green proved nothing, and the report says so. Failing is the good outcome here,
+which inverts `PatchTrial.passes` in a way easy to get backwards — the test for
+a vacuous patch fails if the result is hardcoded to success. Which files are
+tests is a path heuristic (`TEST_PATH`), so a repo naming them otherwise gets an
+honest "nothing to prove it" rather than a confident wrong verdict. The CLI
+baselines the check before starting so it can say which situation you are in.
+Verified against two real agent-written patches: both proved themselves.
+
 **The front door (`cli.py`, verified live).** `tactics <repo> "<task>"` is the
 only thing standing between "a framework you wire up" and "a brain you point at
 a repo" — everything it does was already possible, in about thirty lines you had

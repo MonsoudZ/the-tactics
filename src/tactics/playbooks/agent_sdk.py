@@ -286,8 +286,25 @@ class BriefSpec:
     model: str | None = None
 
 
+# Which files in a patch are its tests. A heuristic, and named as one: a repo
+# that spells them differently gets "could not tell", never a confident guess.
+TEST_PATH = re.compile(r"(^|/)(tests?|spec)/|_(test|spec)\.[a-z]+$|(^|/)test_[^/]+$")
+
 WORKTREE_ROOT_PREFIX = "tactics-worktrees-"
 OWNER_LOCK = ".owner.lock"
+
+
+def _diff_subset(text: str, keep: list[str]) -> str:
+    """The hunks of a unified diff that touch ``keep``, and no others."""
+    wanted, out, taking = set(keep), [], False
+    for line in text.splitlines(keepends=True):
+        if line.startswith("diff --git "):
+            # "diff --git a/path b/path" — the b-side is the file as it will be.
+            parts = line.split()
+            taking = len(parts) >= 4 and parts[3][2:] in wanted
+        if taking:
+            out.append(line)
+    return "".join(out)
 
 
 def _worktree_root_of(path: str) -> str | None:
@@ -574,6 +591,51 @@ class AgentWorkspace(Target):
         )
         child.root = self
         return child
+
+    def proves_itself(self, patch: Patch) -> PatchTrial:
+        """Do this patch's *tests* actually fail without its *code*?
+
+        On a repository whose check is already green, "the check passes after
+        the run" proves only that nothing broke. The agent writes the test that
+        grades its own work, and a test that passes with or without the change
+        grades nothing — which is the same self-report this playbook refuses to
+        trust everywhere else, wearing a passing check as a disguise.
+
+        So: apply only the patch's test files to a clean checkout of HEAD and
+        run the check. It must **fail**. A test that goes red without the
+        implementation is a test that was measuring the implementation.
+
+        ``applies`` says the test half applied; ``passes`` is True when the
+        patch proved itself — i.e. the check failed as it should have. Which
+        files are tests is a path heuristic (``TEST_PATH``), so a repo that
+        names them otherwise gets an honest "could not tell" rather than a
+        confident wrong answer.
+        """
+        tests = [f for f in patch.files if TEST_PATH.search(f)]
+        if not tests:
+            return PatchTrial(applies=False, passes=False,
+                              detail="no test files in this patch — nothing to prove it")
+        subset = _diff_subset(patch.text, tests)
+        if not subset.strip():
+            return PatchTrial(applies=False, passes=False,
+                              detail="could not separate the test changes from the rest")
+        try:
+            scratch = self._add_worktree(prefix="proof")
+        except RuntimeError as exc:
+            return PatchTrial(applies=False, passes=False, detail=str(exc))
+        try:
+            applied, out = scratch.apply_patch(Patch(task=patch.task, text=subset, files=tests))
+            if not applied:
+                return PatchTrial(applies=False, passes=False, detail=out.strip()[-300:])
+            passed, _output = scratch.verify()
+            return PatchTrial(
+                applies=True,
+                passes=not passed,          # failing here is the *good* outcome
+                detail="" if not passed else
+                       f"{', '.join(tests)} pass without the rest of the patch",
+            )
+        finally:
+            self.run(["git", "worktree", "remove", "--force", scratch.path])
 
     def trial(self, patch: Patch) -> PatchTrial:
         """Apply a candidate patch to a scratch checkout of HEAD and measure it.

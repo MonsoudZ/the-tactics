@@ -369,10 +369,24 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:  # noqa: ANN001
         for tactic in colony.tactics:
             tactic.spec = dataclasses.replace(tactic.spec, max_turns=args.max_turns)
 
+    # What does a passing check prove? On a repo whose check is already green,
+    # only that nothing broke — the agent then writes the test that grades its
+    # own work. Worth one run of the check to know which situation this is,
+    # rather than reporting a green check as though it always meant the same
+    # thing.
+    baseline_green = workspace.verify()[0] if not args.dry_run else None
+
     print(f"repo    {repo}")
     print(f"task    {args.task}")
     print(f"check   {' '.join(check)}   <- this decides the reward")
     print(f"posture {type(gate).__name__}   agents {args.agents}   budget ${args.budget:.2f}")
+    if baseline_green is True:
+        print("        your check already passes, so a pass after the run only means "
+              "nothing broke —\n        each candidate's own tests are re-run without "
+              "its code to see if they prove anything")
+    elif baseline_green is False:
+        print("        your check currently fails, so a pass after the run is real "
+              "evidence of repair")
     for warning in _warnings(repo, check):
         print(f"warning {warning}", file=sys.stderr)
     if reaped:
@@ -391,10 +405,12 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:  # noqa: ANN001
         workspace.cleanup()
         _restore_terminate(previous)
 
-    return _report(args, workspace, result, lessons, client, why, gate)
+    return _report(args, workspace, result, lessons, client, why, gate,
+                   baseline_green=baseline_green)
 
 
-def _report(args, workspace, result, lessons, client, why, gate) -> int:  # noqa: ANN001
+def _report(args, workspace, result, lessons, client, why, gate,
+            *, baseline_green=None) -> int:  # noqa: ANN001
     runs = [e for e in result.journal.events if e.kind == "agent.run"]
     spent = sum(e.data.get("cost_usd", 0.0) for e in runs)
     held = sum(e.kind in ("gate.hold", "brief.deny") for e in result.journal.events)
@@ -459,6 +475,19 @@ def _report(args, workspace, result, lessons, client, why, gate) -> int:  # noqa
     elif patches:
         print(f"\nwarning: could not write to {workspace.patch_dir}; "
               "the patches below are the only copy", file=sys.stderr)
+
+    if baseline_green and patches:
+        # The check was green before, so it cannot distinguish a real change
+        # from a no-op. Ask each patch's tests to prove themselves instead.
+        print("\ndo these patches' own tests prove anything? (their tests, applied "
+              "without their code)")
+        for patch in patches:
+            proof = workspace.proves_itself(patch)
+            name = patch.tactic or patch.task
+            if proof.ok:
+                print(f"  {name:<18} yes — its tests fail without its code")
+            else:
+                print(f"  {name:<18} NO — {proof.detail or 'its tests pass regardless'}")
 
     if args.show_diff and patches:
         # Printed in full and not truncated: the worktree that produced this is
