@@ -233,13 +233,16 @@ def _tactics_dir_status(repo: str) -> str:
     return "loose"
 
 
-def _diagnose(errors: list[str]) -> str:
+def _diagnose(errors: list[str], args) -> str:  # noqa: ANN001
     """Turn the agent's error into the thing to actually do about it, if we can."""
     joined = " ".join(errors).lower()
     if "not installed" in joined or "no module named" in joined:
         return "pip install 'tactics[agent-sdk]'"
     if ("api key" in joined) or "unauthorized" in joined or "401" in joined:
         return "authenticate the Claude CLI, or set ANTHROPIC_API_KEY"
+    if "maximum number of turns" in joined:
+        limit = f" (currently {args.max_turns})" if args.max_turns else ""
+        return f"raise --max-turns{limit}, or give the agents a narrower task"
     return ""
 
 
@@ -389,10 +392,17 @@ def _report(args, workspace, result, lessons, client, why, gate) -> int:  # noqa
             print(f"      failed: {e.data['error']}")
 
     failures = [e.data["error"] for e in runs if e.data.get("error")]
-    if runs and len(failures) == len(runs):
+    all_failed = bool(runs) and len(failures) == len(runs)
+    # Spend is the line between the two. A run that cost money reached the
+    # model, so whatever went wrong is an answer about this task — running out
+    # of turns is the ordinary case. A run that cost nothing never got that far,
+    # and calling that a result would be reporting a verdict nobody reached.
+    never_started = all_failed and spent == 0.0
+    if all_failed:
         print("\nevery agent failed before doing any work — this is a setup "
-              "problem, not a result.")
-        hint = _diagnose(failures)
+              "problem, not a result." if never_started
+              else "\nevery agent failed part-way through its run.")
+        hint = _diagnose(failures, args)
         if hint:
             print(f"  → {hint}")
 
@@ -439,7 +449,7 @@ def _report(args, workspace, result, lessons, client, why, gate) -> int:  # noqa
         for lesson in lessons:
             print(f"  • {lesson.text}")
 
-    if runs and len(failures) == len(runs):
+    if never_started:
         return 2                      # nothing ran; distinct from "ran, found nothing"
 
     if not args.no_persist and _tactics_dir_status(workspace.path) == "loose":

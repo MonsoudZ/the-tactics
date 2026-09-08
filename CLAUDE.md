@@ -199,7 +199,9 @@ do**: with the SDK not installed, `1 run(s), $0.00 spent, 0 file(s)` and
 never printed. It prints now, and when *every* run errored the report says so
 plainly, names the fix where it can recognise one (`pip install
 'tactics[agent-sdk]'`, or authenticate), and exits 2 rather than 1, because
-nothing ran at all is not the same answer as ran and found nothing. And **the
+nothing ran at all is not the same answer as ran and found nothing (and
+"nothing ran" is decided by spend, not by the fact that every run errored:
+running out of turns costs money and is a result). And **the
 critic said "check re-run confirms the fix" whenever the check passed**, empty
 diff included — so on an already-green repo every ant confirmed a fix that did
 not exist. A pass over an empty diff now says exactly that. The reward was
@@ -469,7 +471,27 @@ tactics <repo> "<task>" --check "..."  # the front door: point the brain at any 
   Patch selection is live too (3 candidates from 3 briefs, all re-verified,
   smallest landed, suite green on the result; a real LLM judge returning a
   reasoned choice, and the fail-closed fallback firing for real when the judge
-  errored). Still unexercised: `max_turns`, and `max_workers` above 3.
+  errored).
+
+  **`max_turns` and four agents are live now too**, on a fresh build of the
+  calibrated registry repo. One variable: same repo, same brief, same model,
+  `--max-turns 1` → 0 files and `Reached maximum number of turns (1)`;
+  `--max-turns 10` → a verified fix, for a third of a cent more ($0.094 vs
+  $0.096 — the failed run costs about what the successful one does, so a turn
+  budget set too low buys nothing and saves nothing). Four agents is the whole
+  roster at once: 76s, four *distinct* patches, all four verified, main repo
+  clean and no worktrees left. All four wrote snapshot-and-restore rather than
+  the `HANDLERS.clear()` that breaks `test_plugins` — at 10 turns they had room
+  to find the trap, which is the same length effect the 450-trial experiment
+  measured from the other side.
+
+  The `--max-turns 1` run found a real bug in the report, of exactly the kind
+  the previous three were: it called turn exhaustion "a setup problem, not a
+  result" and exited 2. The agent *ran*; it spent $0.09 and hit a ceiling the
+  user set. Spend is now the line between the two — a run that cost money
+  reached the model, so its failure is an answer about this task, and only a
+  run that cost nothing gets called a broken environment. The turn limit also
+  gets its own hint naming the current value.
 - **The single `Agent` loop isolates tactic errors but not `observe()`/goal-predicate
   errors.** The `Colony` (the production path) isolates everything. Keep `Target.observe`
   and `Goal.is_satisfied` total/non-throwing.

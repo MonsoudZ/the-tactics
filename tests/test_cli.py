@@ -463,11 +463,34 @@ def test_parallel_agents_do_not_share_one_prompt(monkeypatch):
 # --- a failure has to look like one -------------------------------------------
 
 
-def _broken_runner(message):
+def _broken_runner(message, cost=0.0):
     def runner(brief, spec, bridge, ws):
-        return AgentRun(cost_usd=0.0, error=message)
+        return AgentRun(cost_usd=cost, error=message)
 
     return runner
+
+
+def test_running_out_of_turns_is_a_result_not_a_setup_problem(tmp_path, capsys):
+    # Found live at --max-turns 1: the agent ran, spent $0.09 and hit a limit
+    # the user set. Reporting that as a broken environment is a wrong answer
+    # about the run, and exiting 2 tells a script the same untruth.
+    repo = _repo(tmp_path)
+    code = main(_argv(repo, "--yes", "--max-turns", "1"),
+                runner=_broken_runner("ResultError('Reached maximum number of "
+                                      "turns (1) (exit code: 1)')", cost=0.09))
+    out = capsys.readouterr().out
+    assert "failed part-way through its run" in out
+    assert "setup problem" not in out
+    assert "raise --max-turns (currently 1)" in out
+    assert code == 1                              # a result, however unwelcome
+
+
+def test_spend_is_what_separates_the_two(tmp_path, capsys):
+    # Same error text, no money spent: the model was never reached.
+    repo = _repo(tmp_path)
+    code = main(_argv(repo, "--yes"), runner=_broken_runner("connection refused"))
+    assert "setup problem" in capsys.readouterr().out
+    assert code == 2
 
 
 def test_a_run_that_never_started_says_why(tmp_path, capsys):
