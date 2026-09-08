@@ -144,6 +144,25 @@ def test_it_warns_about_a_src_layout_with_no_pythonpath(tmp_path, capsys):
     assert "src/ layout with no pythonpath" in capsys.readouterr().err
 
 
+def test_the_suggested_check_is_one_that_can_actually_run(tmp_path, capsys):
+    # Found by pointing tactics at its own repo: the advice was
+    # `PYTHONPATH=$PWD/src pytest -q`, which needs a shell. The check is
+    # shlex.split and run without one, so argv[0] was the assignment itself
+    # and every check died with "command not found". Advice that cannot be
+    # followed is worse than none: it reads like the trap has been handled.
+    import shlex
+    import shutil
+
+    repo = _repo(tmp_path)
+    pathlib.Path(repo, "src").mkdir()
+    main([repo, "t", "--check", "pytest -q", "--no-learn", "--no-persist", "--dry-run"],
+         runner=_runner())
+    advice = capsys.readouterr().err.split("--check '")[1].split("'")[0]
+    argv = shlex.split(advice)
+    assert shutil.which(argv[0]), f"{argv[0]!r} is not an executable"
+    assert "PYTHONPATH" in advice          # and it still does the thing it is for
+
+
 def test_no_such_warning_when_pythonpath_is_configured(tmp_path, capsys):
     repo = _repo(tmp_path)
     pathlib.Path(repo, "src").mkdir()
@@ -483,6 +502,27 @@ def test_running_out_of_turns_is_a_result_not_a_setup_problem(tmp_path, capsys):
     assert "setup problem" not in out
     assert "raise --max-turns (currently 1)" in out
     assert code == 1                              # a result, however unwelcome
+
+
+def test_an_error_is_how_a_run_ended_not_a_verdict_on_what_it_made(tmp_path, capsys):
+    # Found by pointing tactics at its own repo: all three agents hit the turn
+    # limit, and all three had already written a patch the check then verified.
+    # "every agent failed" directly above three passing verdicts is the report
+    # contradicting its own measurements.
+    repo = _repo(tmp_path)
+
+    def worked_then_died(brief, spec, bridge, ws):
+        run = _runner()(brief, spec, bridge, ws)      # writes work.txt, so the check passes
+        run.cost_usd = 0.30
+        run.error = "ResultError('Reached maximum number of turns (15)')"
+        return run
+
+    code = main(_argv(repo, "--yes"), runner=worked_then_died)
+    out = capsys.readouterr().out
+    assert "captured and verified below" in out
+    assert "failed part-way" not in out
+    assert "1 candidate patch(es)" in out
+    assert code == 0                              # it delivered
 
 
 def test_spend_is_what_separates_the_two(tmp_path, capsys):

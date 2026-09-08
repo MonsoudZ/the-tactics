@@ -91,7 +91,7 @@ def _warnings(repo: str, check: list[str]) -> list[str]:
             out.append("this looks like a src/ layout with no pythonpath configured — the "
                        "check runs *inside* each worktree, so an editable install would "
                        "silently measure your main tree instead. Consider "
-                       "--check 'PYTHONPATH=$PWD/src pytest -q'")
+                       "--check 'env PYTHONPATH=src python3 -m pytest -q'")
     return out
 
 
@@ -391,6 +391,7 @@ def _report(args, workspace, result, lessons, client, why, gate) -> int:  # noqa
         if e.data.get("error"):
             print(f"      failed: {e.data['error']}")
 
+    patches = workspace.patches
     failures = [e.data["error"] for e in runs if e.data.get("error")]
     all_failed = bool(runs) and len(failures) == len(runs)
     # Spend is the line between the two. A run that cost money reached the
@@ -399,9 +400,18 @@ def _report(args, workspace, result, lessons, client, why, gate) -> int:  # noqa
     # and calling that a result would be reporting a verdict nobody reached.
     never_started = all_failed and spent == 0.0
     if all_failed:
-        print("\nevery agent failed before doing any work — this is a setup "
-              "problem, not a result." if never_started
-              else "\nevery agent failed part-way through its run.")
+        # Found dogfooding: all three agents hit the turn limit and all three
+        # had already written a patch the check then verified. Calling that a
+        # failed run contradicts the verdicts printed directly underneath it —
+        # an error is how the run *ended*, not a verdict on what it produced.
+        if never_started:
+            print("\nevery agent failed before doing any work — this is a setup "
+                  "problem, not a result.")
+        elif patches:
+            print("\nevery agent errored before finishing, but the work they had "
+                  "already done was captured and verified below.")
+        else:
+            print("\nevery agent failed part-way through its run.")
         hint = _diagnose(failures, args)
         if hint:
             print(f"  → {hint}")
@@ -415,7 +425,6 @@ def _report(args, workspace, result, lessons, client, why, gate) -> int:  # noqa
         for e in verdicts:
             print(f"  {e.data.get('tactic', '?'):<18} {e.data.get('reason', '')}")
 
-    patches = workspace.patches
     print(f"\n{len(patches)} candidate patch(es); your repository is untouched")
     for patch in patches:
         print(f"  from {patch.tactic or patch.task:<18} "
