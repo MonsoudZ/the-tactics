@@ -1359,3 +1359,55 @@ def test_no_store_records_nothing_at_all():
     journal = Journal()
     SingleAgentNarrow().execute(_ctx(_workspace(ScriptedAgent()), journal=journal))
     assert not [e for e in journal.events if e.kind == "lessons.recalled"]
+
+
+# --- bounding what a growing store puts in front of the task -----------------
+
+
+def test_a_growing_store_cannot_swamp_the_brief():
+    # JsonlLessons is append-only: without a ceiling, a year of lessons ends up
+    # in front of every task.
+    store = InMemoryLessons()
+    for i in range(6):
+        store.add(Lesson(text=f"lesson {i} " + "x" * 500, playbook="agent_sdk"))
+    agent = ScriptedAgent()
+    journal = Journal()
+    SingleAgentNarrow(lessons=store, lesson_budget=1200).execute(
+        _ctx(_workspace(agent), journal=journal))
+    recalled = next(e for e in journal.events if e.kind == "lessons.recalled")
+    assert recalled.data["count"] < 6 and recalled.data["dropped"] > 0
+    assert len(agent.briefs[0]) < 2200          # bounded, not unbounded
+
+
+def test_the_most_relevant_lesson_always_survives_the_budget():
+    # Truncation drops the tail, so a budget smaller than one lesson still keeps
+    # the best one rather than silently recalling nothing.
+    store = InMemoryLessons()
+    store.add(Lesson(text="the important one " + "y" * 900, playbook="agent_sdk", goal="delivery"))
+    agent = ScriptedAgent()
+    SingleAgentNarrow(lessons=store, lesson_budget=100).execute(_ctx(_workspace(agent)))
+    assert "the important one" in agent.briefs[0]
+
+
+def test_a_store_within_budget_is_untouched():
+    store = InMemoryLessons()
+    store.add(Lesson(text="short and useful", playbook="agent_sdk"))
+    journal = Journal()
+    SingleAgentNarrow(lessons=store).execute(_ctx(_workspace(ScriptedAgent()), journal=journal))
+    recalled = next(e for e in journal.events if e.kind == "lessons.recalled")
+    assert recalled.data == {"tactic": "SingleAgentNarrow", "count": 1, "dropped": 0}
+
+
+def test_the_scribe_is_told_to_diagnose_rather_than_prescribe():
+    # The 450-trial result, wired back into the thing that writes the lessons.
+    from tactics.llm import ScriptedClient
+    from tactics.playbooks.agent_sdk import BriefScribe
+
+    scribe = BriefScribe(ScriptedClient(["{}"]), InMemoryLessons(), memory=InMemoryStore())
+
+    class _Result:
+        goal, journal, findings = Goal(name="delivery"), Journal(), []
+        def summary(self): return "s"
+
+    prompt = scribe.build_prompt(_Result(), "agent_sdk")
+    assert "Name the cause; do not prescribe a procedure" in prompt

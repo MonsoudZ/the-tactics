@@ -176,7 +176,11 @@ harness is. Lessons go in the *brief*, never the system prompt: the system promp
 **is** the shape being measured, so varying it would make two runs of the same
 tactic incomparable. `run_and_learn(colony, goal, client=...)` closes the loop —
 run, then `BriefScribe` distills the journal *plus the brief scoreboard*, because
-the durable lesson is almost always comparative. Verified across two processes:
+the durable lesson is almost always comparative — and, since the 450-trial
+result below, it is told to **name the cause rather than prescribe a procedure**.
+`lesson_budget` caps how much recalled text precedes the task; that is a guard
+against an append-only store growing forever, not a fix for the length effect
+(the lesson that caused it would have fit inside the budget). Verified across two processes:
 run 1 wrote `SingleAgentNarrow 1.0`, run 2 read it back, explored the untried
 brief, and added `WriteTestFirst 3 runs / 3.0` to the same file; briefs arrived
 carrying a stored lesson. Note what UCB does here — it tries an unmeasured brief

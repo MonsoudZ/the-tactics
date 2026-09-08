@@ -676,6 +676,7 @@ class BriefTactic(Tactic):
         name: str | None = None,
         lessons: LessonStore | None = None,
         lesson_limit: int = 6,
+        lesson_budget: int = 1500,
     ) -> None:
         super().__init__(name=name)
         # Verbal memory: what past runs learned, prepended to every brief. This is
@@ -683,6 +684,12 @@ class BriefTactic(Tactic):
         # every time, however good the harness is.
         self.lessons = lessons
         self.lesson_limit = lesson_limit
+        # A ceiling on how much recalled text may precede the task. The store is
+        # append-only, so without one it grows forever and every brief pays. This
+        # is a guard against unbounded growth, *not* a fix for the length effect
+        # measured in docs/experiments/ — that one is about how prescriptive a
+        # lesson is, and the lesson that caused it would fit inside this budget.
+        self.lesson_budget = lesson_budget
 
     def build_brief(self, ctx: Any) -> str:
         """The task itself. Override to shape *how* it is asked."""
@@ -703,14 +710,21 @@ class BriefTactic(Tactic):
             query=brief,
             limit=self.lesson_limit,
         )
+        kept, spent = [], 0
+        for lesson in relevant:  # most relevant first, so the tail is what drops
+            spent += len(lesson.text)
+            if kept and spent > self.lesson_budget:
+                break
+            kept.append(lesson)
         journal = getattr(ctx, "journal", None)
         if journal is not None:
             # How many lessons actually reached the brief. A store that is wired
             # but empty — a wrong path, a wiped directory, a store that was never
             # populated — is otherwise indistinguishable from having nothing to
             # say, and produces a run that looks like evidence and is not.
-            journal.record("lessons.recalled", tactic=self.name, count=len(relevant))
-        block = render_lessons(relevant, header="What past runs on this repository learned:")
+            journal.record("lessons.recalled", tactic=self.name,
+                           count=len(kept), dropped=len(relevant) - len(kept))
+        block = render_lessons(kept, header="What past runs on this repository learned:")
         return f"{block}\n\n{brief}" if block else brief
 
     def execute(self, ctx: Any) -> Outcome:
@@ -1124,7 +1138,12 @@ class BriefScribe(Scribe):
             f"{super().build_prompt(result, playbook)}\n\n"
             f"Brief standings so far (numeric memory):\n{self.scoreboard()}\n\n"
             "Prefer lessons that would change which brief a future run picks, or how "
-            "a brief is written. A lesson that merely restates a result is not durable."
+            "a brief is written. A lesson that merely restates a result is not durable.\n"
+            "Name the cause; do not prescribe a procedure. A future run reads these on a "
+            "budget, and a lesson that sends it investigating spends the budget it needed "
+            "to write the fix — measured in docs/experiments/: a prescriptive lesson cut "
+            "wrong fixes hardest and still lost, because it pushed 45 of 150 runs into "
+            "turn exhaustion with nothing written."
         )
 
 
