@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -164,6 +165,32 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _catch_terminate():
+    """Make a SIGTERM raise, so the cleanup below it still runs.
+
+    Ctrl-C already unwinds (KeyboardInterrupt is an exception), but the default
+    SIGTERM disposition is to die on the spot — which is how `timeout`, a CI
+    cancellation, or a plain `kill` leave a worktree per agent behind. Turning
+    it into SystemExit costs nothing and covers everything except SIGKILL,
+    which nothing can catch and the reaper handles on the next run instead.
+    """
+    def terminate(_signum, _frame):
+        raise SystemExit(143)        # 128 + SIGTERM
+
+    try:
+        return signal.signal(signal.SIGTERM, terminate)
+    except ValueError:               # not the main thread; nothing to install
+        return None
+
+
+def _restore_terminate(previous) -> None:  # noqa: ANN001
+    if previous is not None:
+        try:
+            signal.signal(signal.SIGTERM, previous)
+        except ValueError:           # pragma: no cover - not the main thread
+            pass
+
+
 def _patch_dir(args, repo: str) -> str:  # noqa: ANN001
     """A directory of its own per run, so one run never overwrites another's.
 
@@ -201,6 +228,7 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:  # noqa: ANN001
 
     workspace = AgentWorkspace(repo, check=check, isolate=True, runner=runner,
                                model=args.model, patch_dir=_patch_dir(args, repo))
+    reaped = workspace.reap_abandoned_worktrees()
     colony = build_delivery_colony(
         workspace,
         gate=gate,
@@ -220,13 +248,17 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:  # noqa: ANN001
     print(f"posture {type(gate).__name__}   agents {args.agents}   budget ${args.budget:.2f}")
     for warning in _warnings(repo, check):
         print(f"warning {warning}", file=sys.stderr)
+    if reaped:
+        print(f"cleaned up {len(reaped)} worktree(s) abandoned by an earlier run")
     print()
 
     client, why = (None, "disabled") if args.no_learn else _scribe_client()
+    previous = _catch_terminate()
     try:
         result, lessons = run_and_learn(colony, work_queue_goal(args.task), client=client)
     finally:
         workspace.cleanup()
+        _restore_terminate(previous)
 
     return _report(args, workspace, result, lessons, client, why, gate)
 

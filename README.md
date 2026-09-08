@@ -55,6 +55,12 @@ lifted out, *before* its worktree is destroyed — so a run that is interrupted,
 crashes, or dies on its budget still leaves its candidates on disk, ready for
 `git apply --3way`. `--patch-dir` puts them somewhere else.
 
+Nor does an interrupted run leave a pile of checkouts in your temp directory:
+Ctrl-C and `kill` unwind and clean up after themselves, and worktrees left by
+something that could not be caught — `kill -9`, a lost machine — are reaped at
+the start of the next run. Worktrees you added yourself, and any a second
+`tactics` run is still working in, are never touched.
+
 Three postures, and the default is the careful one: agents edit and run commands
 freely inside their own worktrees, but anything irreversible — a push, an
 `rm -rf`, a tool nobody classified — is escalated, which means a prompt if you

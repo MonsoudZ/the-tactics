@@ -56,6 +56,11 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+try:                        # advisory locks: POSIX only, and optional here
+    import fcntl
+except ImportError:         # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+
 from ..colony import Colony, FunctionCritic, FunctionPlanner, Verdict
 from ..core.approval import Proposal
 from ..core.context import Context
@@ -281,6 +286,50 @@ class BriefSpec:
     model: str | None = None
 
 
+WORKTREE_ROOT_PREFIX = "tactics-worktrees-"
+OWNER_LOCK = ".owner.lock"
+
+
+def _worktree_root_of(path: str) -> str | None:
+    """The ``tactics-worktrees-*`` directory a worktree sits in, if any.
+
+    Used to tell our own leavings from a worktree the user added themselves,
+    which must never be touched.
+    """
+    current = os.path.abspath(path)
+    while True:
+        parent, name = os.path.split(current)
+        if not name or parent == current:
+            return None
+        if name.startswith(WORKTREE_ROOT_PREFIX):
+            return current
+        current = parent
+
+
+def _is_abandoned(root: str) -> bool:
+    """True when no live process is still working in this worktree root.
+
+    The question a reaper has to answer is "did the run that made this die, or
+    is it still going?", and an advisory lock answers it with no bookkeeping to
+    get wrong: the kernel drops it when the process ends, however it ends — a
+    clean exit, a crash, or ``kill -9``. Where locks are unavailable the answer
+    is no, because reaping a *live* run's worktrees is far worse than leaving a
+    dead one's behind.
+    """
+    if fcntl is None:       # pragma: no cover - Windows
+        return False
+    lock = os.path.join(root, OWNER_LOCK)
+    if not os.path.exists(lock):
+        return True         # nobody ever claimed it
+    try:
+        with open(lock, "a", encoding="utf-8") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(handle, fcntl.LOCK_UN)
+    except OSError:
+        return False        # somebody is still in there
+    return True
+
+
 @dataclass
 class Patch:
     """One ant's work, lifted out of its worktree before the worktree is destroyed.
@@ -470,6 +519,9 @@ class AgentWorkspace(Target):
         # those are the *check's* side effects, not the agent's change. A patch
         # carrying them is bigger, unattributable, and often will not apply.
         self.pending_patch: Patch | None = None
+        # Held open for as long as this run lives, and never closed by hand:
+        # closing it is what tells a later run the root is abandoned.
+        self._owner_lock: Any = None
         self.produced_by: str = ""  # which brief is working in this session
         # A session points back at the repository it was cut from; the main
         # workspace points at itself. A tactic that must act on the *real* tree
@@ -503,7 +555,8 @@ class AgentWorkspace(Target):
         with self._lock:
             if self._worktree_root is None:
                 # Outside the repo, or git would treat it as untracked content.
-                self._worktree_root = tempfile.mkdtemp(prefix="tactics-worktrees-")
+                self._worktree_root = tempfile.mkdtemp(prefix=WORKTREE_ROOT_PREFIX)
+                self._claim(self._worktree_root)
             path = os.path.join(self._worktree_root, f"{prefix}-{uuid.uuid4().hex[:8]}")
             code, out = self.run(["git", "worktree", "add", "--detach", path, "HEAD"])
         if code != 0:
@@ -625,15 +678,79 @@ class AgentWorkspace(Target):
         finally:
             os.unlink(tmp)
 
+    def _claim(self, root: str) -> None:
+        """Take an advisory lock on this run's worktree root.
+
+        Not for mutual exclusion — each run makes its own root — but so that a
+        later run can tell an abandoned root from one still in use. The handle
+        is deliberately kept open; the lock lasts exactly as long as the process.
+        """
+        if fcntl is None:   # pragma: no cover - Windows
+            return
+        try:
+            handle = open(os.path.join(root, OWNER_LOCK), "w", encoding="utf-8")
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:     # pragma: no cover - an unlockable temp dir
+            return
+        self._owner_lock = handle
+
+    def reap_abandoned_worktrees(self) -> list[str]:
+        """Remove this repo's worktrees left behind by a run that was killed.
+
+        A run that dies without unwinding — ``kill -9``, a lost machine, an OOM
+        — leaves its worktrees both registered and on disk, and ``git worktree
+        prune`` will not touch them precisely because the directories are still
+        there. So they accumulate, one full checkout at a time, until somebody
+        notices.
+
+        Two things are never reaped: a worktree the user added themselves (only
+        paths under a ``tactics-worktrees-*`` root are considered), and a root
+        another live run still holds the lock on — so running two agents against
+        one repo at the same time stays safe.
+        """
+        self.run(["git", "worktree", "prune"])      # entries whose dirs are gone
+        roots: dict[str, list[str]] = {}
+        for path in self._registered_worktrees():
+            root = _worktree_root_of(path)
+            if root:
+                roots.setdefault(root, []).append(path)
+
+        reaped: list[str] = []
+        for root in sorted(roots):
+            if root == self._worktree_root or not _is_abandoned(root):
+                continue
+            for path in roots[root]:
+                code, _out = self.run(["git", "worktree", "remove", "--force", path])
+                if code == 0:
+                    reaped.append(path)
+            shutil.rmtree(root, ignore_errors=True)
+        if reaped:
+            self.run(["git", "worktree", "prune"])
+        return reaped
+
+    def _registered_worktrees(self) -> list[str]:
+        """Every worktree git has recorded for this repository, bar the main one."""
+        code, out = self.run(["git", "worktree", "list", "--porcelain"])
+        if code != 0:
+            return []
+        paths = [line[len("worktree "):].strip()
+                 for line in out.splitlines() if line.startswith("worktree ")]
+        return [p for p in paths if os.path.abspath(p) != os.path.abspath(self.path)]
+
     def cleanup(self) -> None:
         """Remove every worktree this workspace created. Safe to call twice."""
         with self._lock:
             root, self._worktree_root = self._worktree_root, None
+            handle, self._owner_lock = self._owner_lock, None
         if not root:
             return
         for name in sorted(os.listdir(root)):
-            self.run(["git", "worktree", "remove", "--force", os.path.join(root, name)])
+            child = os.path.join(root, name)
+            if os.path.isdir(child):    # the lock file is not a worktree
+                self.run(["git", "worktree", "remove", "--force", child])
         self.run(["git", "worktree", "prune"])
+        if handle is not None:
+            handle.close()
         shutil.rmtree(root, ignore_errors=True)
 
     # --- shell seam ----------------------------------------------------------

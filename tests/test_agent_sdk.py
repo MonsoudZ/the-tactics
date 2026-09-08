@@ -645,6 +645,84 @@ def test_release_lifts_the_work_out_as_a_patch_then_removes_the_worktree(tmp_pat
         ws.cleanup()
 
 
+# --- and the leavings do not ---------------------------------------------------
+
+
+def _killed_run(repo, tmp_path):
+    """A run that made a worktree and then died without unwinding."""
+    ws = AgentWorkspace(repo, isolate=True)
+    session = ws.session(None)
+    pathlib.Path(session.path, "half_done.txt").write_text("interrupted\n")
+    # What SIGKILL does: no cleanup, and the process's lock goes with it.
+    if ws._owner_lock is not None:
+        ws._owner_lock.close()
+    return session.path
+
+
+def test_a_worktree_left_by_a_killed_run_is_reaped_by_the_next_one(tmp_path):
+    repo = _git_repo(tmp_path)
+    orphan = _killed_run(repo, tmp_path)
+    assert pathlib.Path(orphan).exists()
+    # git will not prune it by itself, which is the whole problem:
+    subprocess.run(["git", "-C", repo, "worktree", "prune"], check=True, capture_output=True)
+    assert pathlib.Path(orphan).exists()
+
+    later = AgentWorkspace(repo, isolate=True)
+    try:
+        assert later.reap_abandoned_worktrees() == [orphan]
+        assert not pathlib.Path(orphan).exists()
+        assert not pathlib.Path(orphan).parent.exists()     # the root goes too
+        listed = subprocess.run(["git", "-C", repo, "worktree", "list"],
+                                capture_output=True, text=True).stdout
+        assert listed.strip().count("\n") == 0
+    finally:
+        later.cleanup()
+
+
+def test_a_live_runs_worktrees_are_never_reaped(tmp_path):
+    # Two agents against one repo is a supported thing to do. Reaping on start
+    # must not mean the second run deletes the first one's work mid-flight.
+    repo = _git_repo(tmp_path)
+    live = AgentWorkspace(repo, isolate=True)
+    other = AgentWorkspace(repo, isolate=True)
+    try:
+        busy = live.session(None)
+        pathlib.Path(busy.path, "in_progress.txt").write_text("still working\n")
+        assert other.reap_abandoned_worktrees() == []
+        assert pathlib.Path(busy.path, "in_progress.txt").exists()
+    finally:
+        live.cleanup(); other.cleanup()
+
+
+def test_reaping_leaves_worktrees_you_added_yourself_alone(tmp_path):
+    repo = _git_repo(tmp_path)
+    mine = tmp_path / "my-own-worktree"
+    subprocess.run(["git", "-C", repo, "worktree", "add", "--detach", str(mine), "HEAD"],
+                   check=True, capture_output=True)
+    ws = AgentWorkspace(repo, isolate=True)
+    try:
+        assert ws.reap_abandoned_worktrees() == []
+        assert (mine / "seed.txt").exists()
+    finally:
+        ws.cleanup()
+        subprocess.run(["git", "-C", repo, "worktree", "remove", "--force", str(mine)],
+                       capture_output=True)
+
+
+def test_a_run_that_finishes_cleanly_leaves_nothing_to_reap(tmp_path):
+    repo = _git_repo(tmp_path)
+    ws = AgentWorkspace(repo, isolate=True)
+    ws.session(None)
+    ws.cleanup()
+    assert not pathlib.Path(ws.path, ".owner.lock").exists()
+
+    later = AgentWorkspace(repo, isolate=True)
+    try:
+        assert later.reap_abandoned_worktrees() == []
+    finally:
+        later.cleanup()
+
+
 # --- the work outlives the run ------------------------------------------------
 
 

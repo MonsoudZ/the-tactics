@@ -202,8 +202,23 @@ run its own (`<repo>/.tactics/patches/<stamp>`, or a temp dir under
 `--no-persist` — that flag means *do not write your repo*, not *throw the work
 away*), never clobbers an existing file, and is fail-soft: an unwritable archive
 costs the copy, never the patch, and `saved_to` stays empty so the report can
-say so rather than imply a file exists. A hard kill still leaks the worktree
-itself — `git worktree prune` clears it — but no longer the work.
+say so rather than imply a file exists.
+
+**And the leavings are reaped** (verified live). A killed run's worktrees are
+both registered and on disk, which is exactly the case `git worktree prune`
+will not touch, so they accumulate one full checkout at a time. Two halves:
+`SIGTERM` is caught and turned into `SystemExit` so the existing `cleanup()`
+still runs (Ctrl-C already unwound; `timeout`, a CI cancellation and a plain
+`kill` did not), and `reap_abandoned_worktrees()` runs at startup for the case
+nothing can catch. The reaper never touches a worktree the user added
+themselves (only paths under a `tactics-worktrees-*` root count) and never one
+a live run still holds, which is an advisory `flock` on the root rather than a
+PID file: the kernel drops it however the process dies. Where locks are
+unavailable it reaps nothing, because deleting a live run's tree is far worse
+than leaving a dead one's. Deliberately out of scope: a root belonging to a
+*different* repository, which that repo's next run owns, and an empty root left
+by a run that died before its first worktree — sweeping those would mean
+deleting directories this repo never registered.
 
 **Fan-out (verified live: 3 agents, 62s, 3 *distinct* patches, main repo
 untouched).** Set `AgentWorkspace(isolate=True)` and `max_workers > 1`; the

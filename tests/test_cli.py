@@ -250,6 +250,47 @@ def test_no_such_warning_when_the_repo_ignores_its_artifacts(tmp_path, capsys):
     assert "no .gitignore" not in capsys.readouterr().err
 
 
+# --- and the leavings do not ---------------------------------------------------
+
+
+def test_the_cli_reaps_worktrees_a_killed_run_left_behind(tmp_path, capsys):
+    from tactics.playbooks.agent_sdk import AgentWorkspace
+
+    repo = _repo(tmp_path)
+    dead = AgentWorkspace(repo, isolate=True)
+    orphan = dead.session(None).path
+    dead._owner_lock.close()          # what SIGKILL does: no cleanup, no lock
+    assert pathlib.Path(orphan).exists()
+
+    main(_argv(repo, "--yes"), runner=_runner())
+    assert not pathlib.Path(orphan).exists()
+    assert "cleaned up 1 worktree(s) abandoned by an earlier run" in capsys.readouterr().out
+
+
+def test_nothing_is_said_when_there_is_nothing_to_clean_up(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    main(_argv(repo, "--yes"), runner=_runner())
+    assert "abandoned" not in capsys.readouterr().out
+
+
+def test_a_terminate_signal_unwinds_instead_of_leaking(tmp_path):
+    # SIGKILL cannot be caught, but SIGTERM is how `timeout` and a plain `kill`
+    # end a run — and the default disposition dies before any cleanup runs.
+    import signal as signal_module
+
+    from tactics.cli import _catch_terminate, _restore_terminate
+
+    before = signal_module.getsignal(signal_module.SIGTERM)
+    previous = _catch_terminate()
+    installed = signal_module.getsignal(signal_module.SIGTERM)
+    try:
+        with pytest.raises(SystemExit):
+            installed(signal_module.SIGTERM, None)
+    finally:
+        _restore_terminate(previous)
+    assert signal_module.getsignal(signal_module.SIGTERM) is before
+
+
 # --- the candidates outlive the run -------------------------------------------
 
 
