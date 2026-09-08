@@ -238,7 +238,7 @@ take the last and never sum. `BriefSpec.agents` without a delegation tool in
 
 ## How to add a new domain (a "playbook")
 
-This is the path for focumate, trading, lead-finder, gift-cards. Always the same:
+This is the path for focumate, trading, lead-finder, code-review. Always the same:
 
 1. **Write one `Target`** in `src/tactics/playbooks/<domain>.py`. Implement
    `observe()` to read live state. Add domain methods tactics will use
@@ -407,7 +407,11 @@ python3 examples/trading_demo.py       # gated orders, risk limits, walk-forward
       Paper only: the `Broker` seam has never been pointed at a live venue, and
       the defaults refuse to trade one without you saying so explicitly.
 - [x] Playbook: lead-finder — score bad sites, draft + send outreach (`playbooks/lead_finder.py`, dry-run by default).
-- [ ] Playbook: gift-cards — production-readiness checks.
 
 Build them one at a time. Each new playbook should leave this checklist and the
 contracts above true.
+
+A playbook earns its own module when it brings a *domain* — new state to observe,
+new actions to gate, a new way to measure reward. A list of shell commands over
+an existing Target is configuration, not a playbook: `focumate.py` is 74 lines of
+exactly that on top of `repo_health.py`, and that is the right size for it.
