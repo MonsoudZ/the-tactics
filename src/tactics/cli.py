@@ -137,13 +137,29 @@ def _ask(proposal, ctx) -> bool:  # noqa: ANN001
 
 
 def _scribe_client() -> tuple[Any, str]:
-    """The client the scribe distils with, or None and the reason there isn't one."""
+    """The client the scribe distils with, or None and the reason there isn't one.
+
+    The SDK path first, and only then the API. The agents this CLI runs need no
+    API key — they authenticate through the Claude Code CLI — so demanding one
+    for the scribe left the two halves of memory on different credentials, and
+    the verbal half unavailable in exactly the environments where the execution
+    half worked. Same SDK, same auth, no key, nothing billed to the API.
+    """
     try:
-        from .llm.client import ClaudeClient
+        from .llm.client import ClaudeClient, SdkClient
     except ImportError as exc:
         return None, f"tactics[llm] not installed ({exc})"
+
+    try:
+        import claude_agent_sdk  # noqa: F401, PLC0415 - presence check only
+    except ImportError:
+        pass
+    else:
+        return SdkClient(), ""
+
     if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
-        return None, "no ANTHROPIC_API_KEY in the environment"
+        return None, ("no claude-agent-sdk and no ANTHROPIC_API_KEY — "
+                      "install with: pip install 'tactics[agent-sdk]'")
     try:
         return ClaudeClient(), ""
     except Exception as exc:  # noqa: BLE001

@@ -18,13 +18,21 @@ Cost flows through naturally: each call reports tokens as `Outcome.cost`, so a
 `Budget(max_cost=...)` caps token spend across the swarm.
 """
 
-from .client import ClaudeClient, LLMClient, LLMResponse, ScriptedClient, extract_json
+from .client import (
+    ClaudeClient,
+    LLMClient,
+    LLMResponse,
+    ScriptedClient,
+    SdkClient,
+    extract_json,
+)
 from .critic import LLMCritic
 from .scribe import Scribe
 from .tactic import LLMTactic
 
 __all__ = [
     "ClaudeClient",
+    "SdkClient",
     "LLMClient",
     "LLMResponse",
     "LLMCritic",

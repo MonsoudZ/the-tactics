@@ -161,8 +161,11 @@ email good?". Provider-agnostic and offline-testable:
   `Outcome.cost`, so a `Budget` caps token spend.
 - **`LLMCritic`** — an adversarial verifier that **defaults to rejecting when
   unsure** and fails closed on errors, so fake or shaky work never gets trusted.
-- **`ClaudeClient`** for production; **`ScriptedClient`** for tests and demos —
-  no API key, no network. Enable with `pip install 'tactics[llm]'`.
+- **`SdkClient`** for production and **it needs no API key** — it runs through
+  the Claude Agent SDK, the same authentication the agents use, so both halves of
+  memory work on one credential. **`ClaudeClient`** is the `anthropic`-API path
+  (`pip install 'tactics[llm]'`); **`ScriptedClient`** is for tests and demos —
+  no key, no network.
 
 ## Verbal memory: lessons and the scribe
 

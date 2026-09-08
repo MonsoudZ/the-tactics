@@ -81,9 +81,26 @@ For the work that needs a model, not a rule. Provider-agnostic and **offline-tes
 
 | Concept | File | Job |
 |---------|------|-----|
-| `LLMClient` | `llm/client.py` | The one interface (`complete()`). `ClaudeClient` (lazy-imports `anthropic`, model `claude-opus-4-8`) for production; `ScriptedClient` for tests/demos (no key, no network). |
+| `LLMClient` | `llm/client.py` | The one interface (`complete()`). **`SdkClient` needs no API key** — it goes through the Claude Agent SDK, the same authentication the agents already use; `ClaudeClient` (lazy-imports `anthropic`, model `claude-opus-4-8`) for the API path; `ScriptedClient` for tests/demos (no key, no network). |
 | `LLMTactic` | `llm/tactic.py` | A tactic whose `execute()` asks the model; returns a normal `Outcome` so it competes and learns like any other. Token usage → `Outcome.cost` (Budget caps token spend). |
 | `LLMCritic` | `llm/critic.py` | An adversarial verifier — **defaults to reject when unsure, fail-closed on errors**. Gates what the colony learns and commits. |
+
+**Prefer `SdkClient` over `ClaudeClient`.** The agents in the agent-sdk playbook
+authenticate through the Claude Code CLI and need no API key, so requiring one
+for the Scribe put the two halves of memory on *different credentials* — the
+verbal half reported "no ANTHROPIC_API_KEY" in exactly the environments where
+the execution half ran fine. `SdkClient` closes that: same SDK, same auth,
+nothing billed to the API. Two differences to know. It denies every tool call
+through a PreToolUse hook, because a client whose job is answering questions has
+no business touching the filesystem and the SDK's loop would otherwise be free
+to — denial rather than declining to grant, since a grant elsewhere shadows the
+callback. And `schema` becomes an *instruction* rather than a constraint (the
+SDK has no `output_config.format`), parsed leniently by `extract_json`; callers
+already treat an unparseable answer as a failed judgment, which is the right
+posture for a shape the model was merely asked to honour. It is not cheaper per
+token — the CLI sends a substantial system prompt, and a one-word live reply
+cost $0.08 on 902 input tokens — but it needs no separate credential. `cli.py`
+picks it first and falls back to the API path only when the SDK is absent.
 
 Rules: never send `temperature`/`top_p` (Opus 4.x rejects them); request JSON via
 `output_config.format`; `ClaudeClient` lazy-imports so the core installs/tests

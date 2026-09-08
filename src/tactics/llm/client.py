@@ -169,3 +169,106 @@ class ScriptedClient:
             text = self._responses[min(self._i, len(self._responses) - 1)]
             self._i += 1
         return LLMResponse(text=text, input_tokens=len(prompt) // 4, output_tokens=len(text) // 4)
+
+
+class SdkClient:
+    """Talk to Claude through the **Claude Agent SDK** — no API key required.
+
+    :class:`ClaudeClient` needs ``ANTHROPIC_API_KEY`` and bills the API. The
+    agents in the agent-sdk playbook need neither: they run through the Claude
+    Code CLI, which carries its own authentication. That left the two halves of
+    memory authenticated differently — the execution half worked while the
+    verbal half (the Scribe) reported "no ANTHROPIC_API_KEY" in exactly the
+    environments where agents ran fine. This closes that: same SDK, same auth,
+    same subscription.
+
+    Two deliberate differences from the API path:
+
+    * **Every tool call is denied.** A completion has no business touching the
+      filesystem, and the SDK's agent loop would otherwise be free to. The hook
+      is the seam that cannot be shadowed, so the denial is real rather than a
+      matter of not granting anything.
+    * **``schema`` becomes an instruction, not a constraint.** The SDK has no
+      ``output_config.format``, so the shape is asked for in words and parsed
+      leniently by :func:`extract_json`. Callers already treat an unparseable
+      answer as a failed judgment, which is the right posture for a request the
+      model was merely asked to honour.
+
+    ``max_tokens`` is accepted for interface compatibility and ignored: the SDK
+    exposes no equivalent.
+    """
+
+    def __init__(self, model: str | None = None, *, runner: Callable[..., Any] | None = None) -> None:
+        self.model = model
+        self._runner = runner          # test seam; the real one drives the SDK
+
+    def complete(
+        self,
+        prompt: str,
+        *,
+        system: str | None = None,
+        schema: dict | None = None,
+        max_tokens: int | None = None,
+    ) -> LLMResponse:
+        if schema is not None:
+            prompt = (
+                f"{prompt}\n\nReply with a single JSON object matching this schema, "
+                f"and nothing else:\n{json.dumps(schema)}"
+            )
+        run = (self._runner or _sdk_complete)(prompt, system, self.model)
+        if run.get("error"):
+            raise RuntimeError(f"SdkClient: {run['error']}")
+        return LLMResponse(
+            text=run.get("text", ""),
+            input_tokens=int(run.get("input_tokens", 0)),
+            output_tokens=int(run.get("output_tokens", 0)),
+            raw=run,
+        )
+
+
+def _sdk_complete(prompt: str, system: str | None, model: str | None) -> dict:
+    """One tool-free turn through the Agent SDK. Lazy-imported, never raises."""
+    import asyncio  # noqa: PLC0415 - lazy by design
+    from dataclasses import fields as dataclass_fields  # noqa: PLC0415
+
+    try:
+        from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, query  # noqa: PLC0415
+    except ImportError as exc:  # pragma: no cover - environment-dependent
+        return {"error": f"claude-agent-sdk not installed: {exc}"}
+
+    async def deny(hook_input, tool_use_id, context):  # noqa: ANN001 - SDK contract
+        return {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "SdkClient answers questions; it does not use tools",
+        }}
+
+    wanted = {
+        "system_prompt": system,
+        "model": model,
+        "max_turns": 1,
+        "hooks": {"PreToolUse": [HookMatcher(hooks=[deny])]},
+    }
+    known = {f.name for f in dataclass_fields(ClaudeAgentOptions)}
+    options = ClaudeAgentOptions(**{k: v for k, v in wanted.items() if v is not None and k in known})
+
+    out: dict[str, Any] = {"text": "", "input_tokens": 0, "output_tokens": 0}
+
+    async def drive() -> None:
+        chunks: list[str] = []
+        async for message in query(prompt=prompt, options=options):
+            for block in getattr(message, "content", None) or []:
+                if hasattr(block, "text") and not hasattr(block, "name"):
+                    chunks.append(getattr(block, "text", ""))
+            if hasattr(message, "total_cost_usd"):      # the ResultMessage
+                usage = getattr(message, "model_usage", None) or {}
+                out["input_tokens"] = sum(int(u.get("inputTokens", 0) or 0) for u in usage.values())
+                out["output_tokens"] = sum(int(u.get("outputTokens", 0) or 0) for u in usage.values())
+                out["cost_usd"] = float(getattr(message, "total_cost_usd", None) or 0.0)
+        out["text"] = "\n".join(c for c in chunks if c).strip()
+
+    try:
+        asyncio.run(drive())
+    except Exception as exc:  # noqa: BLE001 - a failed judgment is a loss, not a crash
+        out["error"] = repr(exc)
+    return out

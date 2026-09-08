@@ -749,3 +749,37 @@ def test_a_patch_that_does_not_fix_anything_says_so(tmp_path, capsys):
     main([repo, "t", "--check", "test -f never.txt", "--yes", "--no-learn", "--no-persist"],
          runner=_runner("something_else.txt"))
     assert "still failing" in capsys.readouterr().out
+
+
+def test_the_scribe_uses_the_sdk_before_it_asks_for_an_api_key(monkeypatch):
+    # The agents need no API key — they run on the Claude Code CLI's own auth.
+    # Requiring one for the scribe put the two halves of memory on different
+    # credentials, so the verbal half was unavailable in exactly the
+    # environments where the execution half worked.
+    from tactics.cli import _scribe_client
+    from tactics.llm.client import SdkClient
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    client, why = _scribe_client()
+    assert isinstance(client, SdkClient) and why == ""
+
+
+def test_without_the_sdk_it_says_what_to_install(monkeypatch):
+    import builtins
+
+    from tactics.cli import _scribe_client
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    real_import = builtins.__import__
+
+    def no_sdk(name, *a, **kw):
+        if name == "claude_agent_sdk":
+            raise ImportError("nope")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", no_sdk)
+    client, why = _scribe_client()
+    assert client is None
+    assert "tactics[agent-sdk]" in why
