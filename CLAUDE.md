@@ -68,7 +68,7 @@ defaults to `AutoApprove`, a Journal is always attached).
 | **Budgets / limits** | `core/budget.py` | Caps `max_cost` (sum of `Outcome.cost`), `max_seconds` (wall-clock), and `max_attempts_per_task` (colony gives up on a stuck task). The governor against runaway autonomy. |
 | **Approval gate** | `core/approval.py` | `Proposal` + gates: `AutoApprove`, `DryRun` (review-only), `CallbackGate` (human hook), `PolicyGate` (auto-approve reversible/low-risk, escalate the rest). Tactics call `ctx.gate.submit(proposal, ctx)` to commit irreversible actions. |
 | **Audit journal** | `core/journal.py` | Ordered, thread-safe event log (`step`, `verify`, `gate.commit/hold`, `error`…). `result.journal.explain()` answers "why did it do that?". |
-| **Adaptive memory** | `core/memory.py` `RecencyStore` | Recency-weighted stats for non-stationary worlds (trading regimes, changing code). Old experience decays so the mean tracks what works *now*. |
+| **Adaptive memory** | `core/memory.py` `RecencyStore` · `TimeDecayStore` | Recency-weighted stats for non-stationary worlds. Old experience decays so the mean tracks what works *now* — by observation count, or by wall-clock half-life when the world moves while you are not looking. |
 
 **Reward vs cost vs risk** — three separate axes a tactic reports honestly:
 `reward` = how well it served the goal (learning signal); `cost` = what it
@@ -284,11 +284,17 @@ python3 examples/trading_demo.py       # gated orders, risk limits, walk-forward
 
 ## Known limitations (audited, accepted for now)
 
-- **Recency + persistence now combine.** `JsonRecencyStore` is both, via a
-  `_JsonBacked` mixin so persistence and how-stats-update stay orthogonal. Decay
-  is per *observation*, not per unit of time — a store idle for a month reloads
-  at full weight, which is the wrong model for a market that moved while nobody
-  was looking. Time-based decay is not implemented.
+- **Recency, persistence and time-decay all combine.** `_JsonBacked` keeps
+  persistence orthogonal to how stats update, so the four stores are two
+  independent choices: `RecencyStore`/`TimeDecayStore` for *what recent means*,
+  and the `Json*` variants for whether it survives a restart. Decay by
+  observation is right for a backtest (replaying five years in three seconds
+  should fade nothing); decay by clock is right for anything live, and fades on
+  *read* as well as write so an idle store stops handing the policy stale
+  confidence. `JsonTimeDecayStore` round-trips its timestamps, because decay
+  that only runs while the process is alive has no opinion about the week it was
+  dead. `half_life` has no default — the right value is domain-specific and
+  guessing it mis-weights everything the policy reads.
 - **`JsonStore` flushes on every `record`.** Atomic and safe, but O(n) per write;
   fine for thousands of entries, revisit for very large memories.
 - **`ScriptedClient` isn't thread-safe** (its response index races). It's a

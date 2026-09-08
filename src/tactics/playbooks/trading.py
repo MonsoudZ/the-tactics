@@ -57,7 +57,13 @@ from ..core.credit import DiscountedReturn
 from ..core.engine import Agent
 from ..core.estimator import SimilarityEstimator
 from ..core.goal import Goal
-from ..core.memory import JsonRecencyStore, MemoryStore, RecencyStore
+from ..core.memory import (
+    JsonRecencyStore,
+    JsonTimeDecayStore,
+    MemoryStore,
+    RecencyStore,
+    TimeDecayStore,
+)
 from ..core.outcome import Outcome
 from ..core.policy import Policy, UCBPolicy
 from ..core.tactic import Tactic
@@ -551,6 +557,7 @@ def build_trader(
     memory: MemoryStore | None = None,
     persist: str | None = None,
     decay: float = 0.95,
+    half_life: float | None = None,
     gamma: float = 0.9,
     budget: Any = None,
     max_steps: int = 200,
@@ -568,7 +575,11 @@ def build_trader(
       you have to say otherwise on purpose.
     * **Recency-weighted memory.** A market is non-stationary; a plain mean over
       all history anchors the policy to a regime that has ended. Pass ``persist``
-      to keep that memory across restarts without losing the decay.
+      to keep that memory across restarts without losing the decay, and
+      ``half_life`` (seconds) to decay by the clock instead of by observation —
+      which is what a live account wants, since the market moves overnight while
+      the process is asleep. A backtest wants the default: replaying historical
+      bars in three seconds should not fade anything.
     * **A similarity estimator, not exact matching.** Regime features change
       almost every bar, so under exact matching nearly every step is a situation
       never seen before, UCB explores rather than compares, and the first tactic
@@ -586,8 +597,17 @@ def build_trader(
         posture = limits
 
     if memory is None:
-        memory = (JsonRecencyStore(persist, decay=decay) if persist
-                  else RecencyStore(decay=decay))
+        if half_life is not None:
+            # Decay by the clock: right when bars are wall-clock spaced and the
+            # market keeps moving between sessions. A store that only fades as
+            # you act has no opinion about the weekend it sat idle.
+            memory = (JsonTimeDecayStore(persist, half_life=half_life) if persist
+                      else TimeDecayStore(half_life=half_life))
+        else:
+            # Decay by observation: right for a backtest, where "how long ago"
+            # means bars rather than seconds and the clock is meaningless.
+            memory = (JsonRecencyStore(persist, decay=decay) if persist
+                      else RecencyStore(decay=decay))
 
     return Agent(
         market,

@@ -34,7 +34,8 @@ The core never changes.
   parallel workers of one round try *different* tactics instead of all agreeing.
 - **`Memory`** — records every outcome per tactic and situation. `JsonStore` to
   keep learning across runs, `RecencyStore` to let stale experience fade,
-  `JsonRecencyStore` when you need both.
+  `JsonRecencyStore` when you need both, and `TimeDecayStore` when "recent"
+  means wall-clock time rather than observation count.
 - **`Agent`** — runs the loop.
 
 ## The colony (the "lots of little ants" part)
@@ -77,8 +78,10 @@ Autonomy you can actually turn loose — all domain-free, all off by default:
   Swap the gate to go from review-only to human-approved to fully autonomous.
 - **Audit journal** (`Journal`) — every decision recorded; `result.journal.explain()`
   answers "why did it do that?".
-- **Adaptive memory** (`RecencyStore`) — for worlds that change (markets, code),
-  old experience decays so it tracks what works *now*.
+- **Adaptive memory** (`RecencyStore`, `TimeDecayStore`) — for worlds that change
+  (markets, code), old experience decays so it tracks what works *now*: by
+  observation count, or by wall-clock half-life when the world keeps moving while
+  the process is idle. Both persist (`JsonRecencyStore`, `JsonTimeDecayStore`).
 
 ## The judgment brain (`tactics.llm`)
 
@@ -255,10 +258,9 @@ Worth stating plainly, because "the tests pass" turned out to be a weak claim:
   with a silent bypass, an 18x token undercount, and a colony that marked failed
   work complete. Keep the injectable seams *and* point them at the real thing
   periodically; neither alone is enough.
-- **Not verified.** No live broker has ever been connected. `RecencyStore` decays
-  per observation rather than per unit of time, so a store left idle reloads at
-  full weight — the wrong model for a market that moved while nobody was looking.
-  `max_workers` above 3 is unexercised.
+- **Not verified.** No live broker has ever been connected, and `max_workers`
+  above 3 is unexercised. Time-decayed memory is tested against an injected
+  clock rather than against real elapsed time.
 
 ## Status
 

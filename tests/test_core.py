@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import pathlib
 import random
 
 import pytest
@@ -389,3 +391,144 @@ def test_reopening_with_a_different_decay_governs_from_then_on(tmp_path):
     reopened = JsonRecencyStore(path, decay=0.1)   # decay is config, not data
     assert reopened.decay == 0.1
     assert reopened.stats("t", "sig").total_reward == 1.0   # what was written stands
+
+
+# --- decay by the clock, not by the number of observations --------------------
+
+
+class _Clock:
+    """A hand-cranked clock, because a test that sleeps is a test nobody runs."""
+
+    def __init__(self, t=1_000_000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, seconds):
+        self.t += seconds
+        return self
+
+
+def test_a_half_life_is_required_because_the_right_one_is_domain_specific():
+    from tactics import TimeDecayStore
+
+    with __import__("pytest").raises(ValueError, match="positive"):
+        TimeDecayStore(0)
+    with __import__("pytest").raises(TypeError):
+        TimeDecayStore()          # no default: guessing it mis-weights everything
+
+
+def test_experience_halves_over_one_half_life():
+    from tactics import TimeDecayStore
+
+    clock = _Clock()
+    store = TimeDecayStore(half_life=60.0, clock=clock)
+    store.record("t", "sig", reward=1.0, success=True)
+    assert store.stats("t", "sig").trials == 1.0
+
+    clock.advance(60)
+    assert store.stats("t", "sig").trials == pytest.approx(0.5)
+    clock.advance(60)
+    assert store.stats("t", "sig").trials == pytest.approx(0.25)
+
+
+def test_an_idle_store_fades_without_being_written_to():
+    # The failure this exists to prevent: a store nobody touched over a weekend
+    # handing the policy full confidence in a world that has since moved.
+    from tactics import RecencyStore, TimeDecayStore
+
+    clock = _Clock()
+    timed = TimeDecayStore(half_life=3600.0, clock=clock)
+    counted = RecencyStore(decay=0.5)
+    for store in (timed, counted):
+        store.record("t", "sig", reward=1.0, success=True)
+
+    clock.advance(86_400)                       # a day passes; nothing happens
+    assert timed.stats("t", "sig").trials < 0.001
+    assert counted.stats("t", "sig").trials == 1.0   # count-based decay noticed nothing
+
+
+def test_the_mean_still_reads_correctly_while_the_weight_fades():
+    from tactics import TimeDecayStore
+
+    clock = _Clock()
+    store = TimeDecayStore(half_life=60.0, clock=clock)
+    for _ in range(4):
+        store.record("t", "sig", reward=1.0, success=True)
+    clock.advance(300)
+    st = store.stats("t", "sig")
+    assert st.trials < 0.2                      # barely any weight left
+    assert st.mean_reward == pytest.approx(1.0) # but it still says what it learned
+
+
+def test_a_recent_result_outweighs_an_old_one():
+    from tactics import TimeDecayStore
+
+    clock = _Clock()
+    store = TimeDecayStore(half_life=60.0, clock=clock)
+    store.record("t", "sig", reward=1.0, success=True)     # the old regime
+    clock.advance(600)
+    store.record("t", "sig", reward=0.0, success=False)    # the regime turned
+    assert store.stats("t", "sig").mean_reward < 0.02
+
+
+def test_a_clock_that_jumps_backwards_never_amplifies_old_experience():
+    from tactics import TimeDecayStore
+
+    clock = _Clock()
+    store = TimeDecayStore(half_life=60.0, clock=clock)
+    store.record("t", "sig", reward=1.0, success=True)
+    clock.advance(-3600)                        # an NTP correction, say
+    assert store.stats("t", "sig").trials == pytest.approx(1.0)
+
+
+def test_totals_and_entries_fade_too_or_the_policy_reads_stale_confidence():
+    from tactics import TimeDecayStore
+
+    clock = _Clock()
+    store = TimeDecayStore(half_life=60.0, clock=clock)
+    store.record("a", "sig", reward=1.0, success=True, features={"x": 1}, goal="g")
+    store.record("b", "sig", reward=1.0, success=True, features={"x": 1}, goal="g")
+    clock.advance(60)
+    assert store.total_trials("sig") == pytest.approx(1.0)      # 2 × 0.5
+    assert all(e.stats.trials == pytest.approx(0.5) for e in store.entries())
+
+
+def test_the_time_a_process_spent_dead_still_counts(tmp_path):
+    # The reload case is the whole point: decay that only runs while the process
+    # is alive has no opinion about the week it was not.
+    from tactics import JsonTimeDecayStore
+
+    path = str(tmp_path / "m.json")
+    clock = _Clock()
+    store = JsonTimeDecayStore(path, half_life=60.0, clock=clock)
+    store.record("t", "sig", reward=1.0, success=True)
+
+    later = _Clock(clock.t + 180)               # three half-lives later
+    reopened = JsonTimeDecayStore(path, half_life=60.0, clock=later)
+    assert reopened.stats("t", "sig").trials == pytest.approx(0.125)
+
+
+def test_a_persisted_time_store_round_trips_its_timestamps(tmp_path):
+    from tactics import JsonTimeDecayStore
+
+    path = str(tmp_path / "m.json")
+    clock = _Clock()
+    JsonTimeDecayStore(path, half_life=60.0, clock=clock).record(
+        "t", "sig", reward=1.0, success=True)
+    saved = json.loads(pathlib.Path(path).read_text())
+    assert saved[0]["last_seen"] == clock.t
+
+    same_moment = JsonTimeDecayStore(path, half_life=60.0, clock=_Clock(clock.t))
+    assert same_moment.stats("t", "sig").trials == pytest.approx(1.0)
+
+
+def test_the_other_stores_are_unaffected_by_the_new_row_field(tmp_path):
+    from tactics import JsonRecencyStore, JsonStore
+
+    for cls, kw in ((JsonStore, {}), (JsonRecencyStore, {"decay": 0.9})):
+        path = str(tmp_path / f"{cls.__name__}.json")
+        cls(path, **kw).record("t", "sig", reward=1.0, success=True)
+        assert "last_seen" not in json.loads(pathlib.Path(path).read_text())[0]
+        assert cls(path, **kw).stats("t", "sig").trials > 0

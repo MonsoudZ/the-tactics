@@ -364,3 +364,21 @@ def test_a_position_reports_its_unrealised_pnl():
 def test_a_tactic_that_cannot_afford_anything_stands_aside():
     market = _market({"AAA": [100, 104, 108, 112, 116, 120]}, cash=1.0)
     assert RideMomentum(threshold=0.01).decide(_ctx(market)) is None
+
+
+def test_a_backtest_decays_by_observation_and_a_live_account_by_the_clock():
+    # Replaying five years of bars in three seconds should fade nothing, so the
+    # default is observation-based. A live account wants the opposite.
+    from tactics import RecencyStore, TimeDecayStore
+
+    assert isinstance(build_trader(_market()).memory, RecencyStore)
+    timed = build_trader(_market(), half_life=3600.0).memory
+    assert isinstance(timed, TimeDecayStore) and timed.half_life == 3600.0
+
+
+def test_a_clock_decayed_account_persists_its_timestamps(tmp_path):
+    from tactics import JsonTimeDecayStore
+
+    agent = build_trader(_market(), persist=str(tmp_path / "m.json"), half_life=900.0)
+    assert isinstance(agent.memory, JsonTimeDecayStore)
+    assert agent.memory.half_life == 900.0

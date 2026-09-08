@@ -13,10 +13,13 @@ track record across *similar* situations, not just identical ones.
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
+import time
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
+from collections.abc import Callable
 from typing import Any, Protocol
 
 
@@ -144,6 +147,92 @@ class RecencyStore(InMemoryStore):
             self._meta[signature] = (features or {}, goal)
 
 
+class TimeDecayStore(InMemoryStore):
+    """Recency by *clock time* rather than by observation count.
+
+    :class:`RecencyStore` fades old experience one step per new observation,
+    which is the right model when the world moves as you act on it. It is the
+    wrong model when the world moves while you are not looking: a store left
+    idle over a weekend reloads at full weight and the policy acts on a market,
+    or a codebase, that has since changed underneath it.
+
+    Here each cell decays continuously by its own age. ``half_life`` is in
+    seconds and has no default on purpose — the right value is a property of the
+    domain (an hour for intraday signals, a month for which lint rule matters),
+    and quietly guessing it would mis-weight everything the policy ever reads.
+
+    Decay is applied on *read* as well as on write, so a store that has simply
+    been sitting there reports faded numbers without needing a write to notice
+    the time. ``clock`` is injectable, which is what makes any of this testable.
+    """
+
+    def __init__(self, half_life: float, *, clock: Callable[[], float] = time.time) -> None:
+        super().__init__()
+        if half_life <= 0:
+            raise ValueError("half_life must be positive (seconds)")
+        self.half_life = half_life
+        self.clock = clock
+        self._seen: dict[tuple[str, str], float] = {}  # (signature, tactic) -> last touched
+
+    def _weight(self, key: tuple[str, str], now: float) -> float:
+        last = self._seen.get(key)
+        if last is None:
+            return 1.0
+        # A clock that jumps backwards (an NTP correction) must never *amplify*
+        # old experience, so age is floored at zero.
+        age = max(0.0, now - last)
+        return math.pow(0.5, age / self.half_life)
+
+    def _faded(self, key: tuple[str, str], st: TacticStats, now: float) -> TacticStats:
+        w = self._weight(key, now)
+        return TacticStats(
+            trials=st.trials * w,
+            successes=st.successes * w,
+            total_reward=st.total_reward * w,
+        )
+
+    def record(
+        self,
+        tactic_name: str,
+        signature: str,
+        *,
+        reward: float,
+        success: bool,
+        features: dict[str, Any] | None = None,
+        goal: str | None = None,
+    ) -> None:
+        key = (signature, tactic_name)
+        now = self.clock()
+        st = self._table.setdefault(key, TacticStats())
+        faded = self._faded(key, st, now)
+        st.trials = faded.trials + 1
+        st.successes = faded.successes + (1 if success else 0)
+        st.total_reward = faded.total_reward + reward
+        self._seen[key] = now
+        if features is not None or goal is not None:
+            self._meta[signature] = (features or {}, goal)
+
+    # Reads fade too — otherwise an idle store hands the policy stale confidence.
+
+    def stats(self, tactic_name: str, signature: str) -> TacticStats:
+        key = (signature, tactic_name)
+        st = self._table.get(key)
+        return self._faded(key, st, self.clock()) if st else TacticStats()
+
+    def total_trials(self, signature: str) -> int:
+        now = self.clock()
+        return sum(self._faded(k, st, now).trials
+                   for k, st in self._table.items() if k[0] == signature)
+
+    def entries(self) -> Iterator[Entry]:
+        now = self.clock()
+        for key, st in self._table.items():
+            sig, name = key
+            features, goal = self._meta.get(sig, ({}, None))
+            yield Entry(signature=sig, tactic=name, stats=self._faded(key, st, now),
+                        features=features, goal=goal)
+
+
 class _JsonBacked:
     """Mixin: persist a store's table to a JSON file, atomically, on every record.
 
@@ -170,6 +259,7 @@ class _JsonBacked:
                 total_reward=entry["total_reward"],
             )
             self._meta[sig] = (entry.get("features") or {}, entry.get("goal"))
+            self._load_extra((sig, name), entry)
 
     def _flush(self) -> None:
         rows = [
@@ -181,6 +271,7 @@ class _JsonBacked:
                 "total_reward": st.total_reward,
                 "features": self._meta.get(sig, ({}, None))[0],
                 "goal": self._meta.get(sig, ({}, None))[1],
+                **self._row_extra((sig, name)),
             }
             for (sig, name), st in self._table.items()
         ]
@@ -193,6 +284,15 @@ class _JsonBacked:
     def record(self, tactic_name: str, signature: str, **kw: Any) -> None:
         super().record(tactic_name, signature, **kw)
         self._flush()
+
+    # Hooks so a store with more per-cell state than the stats themselves can
+    # round-trip it. Without this a time-decayed store would reload with no idea
+    # how old its numbers are — which is the exact bug it exists to prevent.
+    def _row_extra(self, key: tuple[str, str]) -> dict[str, Any]:
+        return {}
+
+    def _load_extra(self, key: tuple[str, str], entry: dict[str, Any]) -> None:
+        return None
 
 
 class JsonStore(_JsonBacked, InMemoryStore):
@@ -216,3 +316,21 @@ class JsonRecencyStore(_JsonBacked, RecencyStore):
     """
 
 
+
+
+class JsonTimeDecayStore(_JsonBacked, TimeDecayStore):
+    """Persistent *and* time-decayed. The combination a market actually wants.
+
+    The timestamps ride along in the file, so reopening a store after a week
+    finds week-old experience already faded rather than restored to full
+    confidence. That reload is the whole point: a store that only decays while
+    the process is alive has no opinion about the time it spent dead.
+    """
+
+    def _row_extra(self, key: tuple[str, str]) -> dict[str, Any]:
+        return {"last_seen": self._seen.get(key)}
+
+    def _load_extra(self, key: tuple[str, str], entry: dict[str, Any]) -> None:
+        seen = entry.get("last_seen")
+        if seen is not None:
+            self._seen[key] = float(seen)

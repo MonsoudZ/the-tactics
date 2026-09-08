@@ -51,9 +51,11 @@ from .core.memory import (
     InMemoryStore,
     JsonRecencyStore,
     JsonStore,
+    JsonTimeDecayStore,
     MemoryStore,
     RecencyStore,
     TacticStats,
+    TimeDecayStore,
 )
 from .core.outcome import Outcome
 from .core.policy import EpsilonGreedyPolicy, Policy, UCBPolicy, WithoutReplacement
@@ -88,6 +90,7 @@ __all__ = [
     "LessonStore",
     "JsonRecencyStore",
     "JsonStore",
+    "JsonTimeDecayStore",
     "load_env",
     "render_lessons",
     "MemoryStore",
@@ -96,6 +99,7 @@ __all__ = [
     "PolicyGate",
     "Proposal",
     "RecencyStore",
+    "TimeDecayStore",
     "Record",
     "RunResult",
     "SimilarityEstimator",
