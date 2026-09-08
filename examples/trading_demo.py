@@ -18,7 +18,6 @@ from tactics.playbooks.trading import (
     RideMomentum,
     RiskLimits,
     StandAside,
-    build_trader,
     scoreboard,
     survive_goal,
     walk_forward,
@@ -41,7 +40,7 @@ def one_decision(label, gate):
     data = market.observe()
     ctx = Context(target=market, goal=survive_goal(), data=data,
                   features=market.features(data), gate=gate, journal=journal)
-    outcome = RideMomentum(threshold=-1.0).execute(ctx)
+    RideMomentum(threshold=-1.0).execute(ctx)
     print(f"  {label:<34} fills={len(market.broker.fills)}  cash={market.broker.cash():,.0f}")
     for e in journal.events:
         if e.kind in ("gate.commit", "gate.hold", "risk.refused"):

@@ -49,8 +49,8 @@ where one would go, and no live broker has ever been run against this code.
 from __future__ import annotations
 
 import statistics
-from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 from ..core.approval import ApprovalGate, AutoApprove, DryRun, GateResult, Proposal
 from ..core.credit import DiscountedReturn

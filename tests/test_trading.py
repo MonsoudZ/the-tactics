@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from tactics import AutoApprove, Context, DryRun, Goal, Journal, RecencyStore
+from tactics import AutoApprove, Context, DryRun, Journal, RecencyStore
 from tactics.playbooks.trading import (
     BUY,
     SELL,
@@ -305,3 +305,62 @@ def test_tactics_stand_down_once_the_series_is_exhausted():
     market.settle()             # runs off the end
     assert market.exhausted
     assert StandAside().is_applicable(_ctx(market)) is False
+
+
+# --- each tactic's actual decision --------------------------------------------
+
+
+def _warm(market, bars):
+    """Indicators need history; at bar 0 momentum and z-score are both zero."""
+    for _ in range(bars):
+        market.settle()
+    return market
+
+
+def test_momentum_buys_the_strongest_symbol_and_only_past_its_threshold():
+    market = _warm(_market({"WEAK": [100, 100, 100, 100, 100, 100],
+                            "STRONG": [100, 104, 108, 112, 116, 120]}), 5)
+    assert RideMomentum(threshold=0.05).decide(_ctx(market)).symbol == "STRONG"
+    assert RideMomentum(threshold=0.90).decide(_ctx(market)) is None   # nothing is that strong
+
+
+def test_fade_buys_what_is_furthest_below_its_own_mean():
+    market = _warm(_market({"CALM": [100, 100, 100, 100, 100, 100],
+                            "SLUMPED": [120, 118, 112, 104, 96, 88]}), 5)
+    order = FadeExtreme(threshold=-1.0).decide(_ctx(market))
+    assert order is not None and order.symbol == "SLUMPED" and order.side == BUY
+    assert FadeExtreme(threshold=-5.0).decide(_ctx(market)) is None    # not extreme enough
+
+
+def test_take_profit_sells_a_winner_and_leaves_a_loser_alone():
+    market = _market({"AAA": [100, 100, 100, 130]}, cash=10_000.0)
+    market.place(Order("AAA", BUY, 10))            # basis 100
+    assert TakeProfit(gain=0.05).decide(_ctx(market)) is None   # still at 100
+    market.settle(); market.settle(); market.settle()           # price runs to 130
+    order = TakeProfit(gain=0.05).decide(_ctx(market))
+    assert order is not None and order.side == SELL and order.qty == 10
+
+
+def test_cut_loss_sells_a_loser_and_leaves_a_winner_alone():
+    market = _market({"AAA": [100, 100, 100, 80]}, cash=10_000.0)
+    market.place(Order("AAA", BUY, 10))
+    assert CutLoss(loss=0.05).decide(_ctx(market)) is None
+    market.settle(); market.settle(); market.settle()           # price falls to 80
+    order = CutLoss(loss=0.05).decide(_ctx(market))
+    assert order is not None and order.side == SELL and order.qty == 10
+
+
+def test_neither_exit_fires_with_nothing_held():
+    market = _market({"AAA": [100, 130]})
+    assert TakeProfit().decide(_ctx(market)) is None
+    assert CutLoss().decide(_ctx(market)) is None
+
+
+def test_a_position_reports_its_unrealised_pnl():
+    assert Position("AAA", qty=10, cost_basis=100.0).unrealized(112.0) == pytest.approx(120.0)
+    assert Position("AAA").unrealized(112.0) == 0.0
+
+
+def test_a_tactic_that_cannot_afford_anything_stands_aside():
+    market = _market({"AAA": [100, 104, 108, 112, 116, 120]}, cash=1.0)
+    assert RideMomentum(threshold=0.01).decide(_ctx(market)) is None
