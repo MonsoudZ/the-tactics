@@ -166,9 +166,25 @@ irreversible + high risk, so a `PolicyGate` escalates it. Cost comes from
 `total_cost_usd`, never from summing assistant `usage`: with subagents `usage`
 counts only the top-level loop, so `ReviewedSwarm` would look artificially cheap
 and the Budget would under-count the tactic most able to run away with the bill.
+A patch is captured **before the check runs**: the check's own artifacts
+(`__pycache__`, coverage data, build output) are its side effects, not the
+agent's work, and a patch carrying them is bigger, unattributable, and often
+will not apply. An agent that runs the suite itself can still pull artifacts in,
+which is why a repo without a `.gitignore` gets a warning rather than a fix.
+
 Reward is 1.0 only when the check passes *and* the diff is non-empty — a
 confident summary over an empty diff is the exact failure this guards. Efficiency
 lives on `cost`, not `reward`.
+
+**The front door (`cli.py`, verified live).** `tactics <repo> "<task>"` is the
+only thing standing between "a framework you wire up" and "a brain you point at
+a repo" — everything it does was already possible, in about thirty lines you had
+to get right. It always isolates (worktrees), defaults to a `PolicyGate` that
+escalates anything irreversible (prompting at a terminal, refusing without one),
+never writes the repo without `--apply`, and warns about the two setups that
+silently measure the wrong thing: a `src/` layout with no pythonpath, and a repo
+with no `.gitignore`. Verified end to end on a red repo: 2 agents, 1 verified
+patch, landed, suite green.
 
 **Fan-out (verified live: 3 agents, 62s, 3 *distinct* patches, main repo
 untouched).** Set `AgentWorkspace(isolate=True)` and `max_workers > 1`; the
@@ -280,6 +296,7 @@ python3 examples/safety_demo.py        # see budgets, the approval gate, the jou
 python3 examples/llm_demo.py           # LLM tactics + LLM critic (offline, scripted)
 python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code agent (offline)
 python3 examples/trading_demo.py       # gated orders, risk limits, walk-forward (offline, no broker)
+tactics <repo> "<task>" --check "..."  # the front door: point the brain at any repo
 ```
 
 ## Known limitations (audited, accepted for now)

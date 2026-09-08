@@ -1411,3 +1411,42 @@ def test_the_scribe_is_told_to_diagnose_rather_than_prescribe():
 
     prompt = scribe.build_prompt(_Result(), "agent_sdk")
     assert "Name the cause; do not prescribe a procedure" in prompt
+
+
+def test_what_the_check_creates_is_not_captured_as_the_agents_work(tmp_path):
+    # Found live: the check ran pytest, pytest wrote __pycache__, and the .pyc
+    # files ended up in the patch — which then would not apply anywhere else.
+    # The agent must do the writing, or the no-op guard short-circuits execute
+    # and the check never runs — which is how the first version of this test
+    # passed against the very bug it was meant to catch.
+    def writing_runner(brief, spec, bridge, ws_):
+        run = AgentRun(cost_usd=0.01)
+        if bridge.decide("Write", {"file_path": "real_work.py"})[0]:
+            pathlib.Path(ws_.path, "real_work.py").write_text("print('the agent did this')\n")
+        return run
+
+    ws = AgentWorkspace(_git_repo(tmp_path), isolate=True, runner=writing_runner,
+                        check=["sh", "-c", "mkdir -p __pycache__ && echo x > __pycache__/a.pyc"])
+    try:
+        session = ws.session(None)
+        SingleAgentNarrow().execute(_ctx(session))
+        ws.release(session)
+
+        patch = ws.patches[0]
+        assert "real_work.py" in patch.text          # the agent's change is there
+        assert ".pyc" not in patch.text              # the check's litter is not
+        assert not any(".pyc" in f for f in patch.files)
+    finally:
+        ws.cleanup()
+
+
+def test_a_session_with_no_pending_capture_still_captures_at_release(tmp_path):
+    # release() is the fallback path when a tactic never ran (a bare session).
+    ws = AgentWorkspace(_git_repo(tmp_path), check=["true"], isolate=True)
+    try:
+        session = ws.session(None)
+        pathlib.Path(session.path, "by_hand.txt").write_text("hi\n")
+        ws.release(session)
+        assert "by_hand.txt" in ws.patches[0].text
+    finally:
+        ws.cleanup()

@@ -11,6 +11,47 @@ It's all one loop:
 Goal → pick a Tactic → act on a Target → measure the Outcome → learn → repeat
 ```
 
+## Point it at a repository
+
+```bash
+pip install -e '.[agent-sdk]'
+
+tactics ~/code/api "add retry with backoff to the HTTP client" \
+    --check "pytest -q" --agents 3 --budget 5.00
+```
+
+Cuts a git worktree per agent, sends each a **different brief**, runs them in
+parallel, verifies each one *in its own tree* by running your check, then prints
+the scoreboard and the candidate patches. **Your repository is never written to
+unless you pass `--apply`.**
+
+```
+repo    /home/you/code/api
+task    fix the test isolation failure
+check   pytest -q   <- this decides the reward
+posture AutoApprove   agents 2   budget $5.00
+
+2 run(s), $0.13 spent, 0 tool call(s) held by the gate
+  SingleAgentNarrow  $0.0554  0 file(s)
+  WriteTestFirst     $0.0773  1 file(s)
+
+1 candidate patch(es); your repository is untouched
+  from WriteTestFirst     22 diff lines  ['tests/conftest.py']
+
+apply: landed WriteTestFirst (smallest verified diff)
+```
+
+Three postures, and the default is the careful one: agents edit and run commands
+freely inside their own worktrees, but anything irreversible — a push, an
+`rm -rf`, a tool nobody classified — is escalated, which means a prompt if you
+are at a terminal and a refusal if you are not. `--yes` approves everything
+(still inside the worktrees); `--dry-run` means the agents may read and reason
+but cannot write a byte.
+
+The `--check` command *is* the reward, so the CLI echoes it back and warns about
+the two ways it silently measures the wrong thing: a `src/` layout with no
+pythonpath configured, and a repo with no `.gitignore`.
+
 ## Why one loop covers everything
 
 | Use case            | Goal                   | Tactics                              | Outcome (the reward) |

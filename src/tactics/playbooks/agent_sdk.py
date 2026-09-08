@@ -459,6 +459,11 @@ class AgentWorkspace(Target):
         self.landed: list[Patch] = []
         self.discarded: list[Patch] = []
         self.task_id: str = ""      # set on a session, for patch attribution
+        # The agent's work, captured before the check ran. Running the check
+        # creates files of its own — .pyc, coverage data, build output — and
+        # those are the *check's* side effects, not the agent's change. A patch
+        # carrying them is bigger, unattributable, and often will not apply.
+        self.pending_patch: Patch | None = None
         self.produced_by: str = ""  # which brief is working in this session
         # A session points back at the repository it was cut from; the main
         # workspace points at itself. A tactic that must act on the *real* tree
@@ -550,7 +555,7 @@ class AgentWorkspace(Target):
         """Lift the work out as a patch, then remove the worktree."""
         if session is self or not isinstance(session, AgentWorkspace):
             return
-        patch = session.capture_patch()
+        patch = session.pending_patch or session.capture_patch()
         with self._lock:
             if patch:
                 self.patches.append(patch)
@@ -768,6 +773,10 @@ class BriefTactic(Tactic):
             held = f" ({len(run.denied)} tool call(s) held by the gate)" if run.denied else ""
             return Outcome(success=False, reward=0.0, cost=cost, metrics=metrics,
                            notes=f"agent left the working tree untouched{held}")
+
+        # Capture before verifying: after this line the check will litter the
+        # worktree with its own artifacts, and they are not the agent's work.
+        ctx.target.pending_patch = ctx.target.capture_patch()
 
         passed, output = ctx.target.verify()
         if journal is not None and not passed:

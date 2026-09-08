@@ -12,6 +12,9 @@ license = { text = "MIT" }
 authors = [{ name = "Monsoud Zanaty" }]
 dependencies = []
 
+[project.scripts]
+tactics = "tactics.cli:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=7.0", "ruff>=0.4"]
 llm = ["anthropic>=0.40"]
