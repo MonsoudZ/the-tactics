@@ -313,33 +313,34 @@ python3 examples/agent_sdk_demo.py     # the framework governing a Claude Code a
   Read it carefully, though: this lesson advised installing a package that
   *cannot* be installed here, so an agent ignoring it may simply be right.
 
-  **The calibrated version was then built and run: 60 trials, three arms.** The
-  repo (a module-level registry that leaks between tests, where the obvious fix
-  breaks a second test) sits at a 60% unaided pass rate with `max_turns=5` — the
-  headroom the earlier repos lacked. Arms: no lesson, the scribe's own lessons,
-  and a hand-written mechanism lesson as an upper bound. n=20 each.
+  **The calibrated experiment was then run properly: 450 trials, three arms,
+  n=150 each, interleaved.** The repo (a module-level registry that leaks between
+  tests, where the obvious fix breaks a second test) sits at a 49% unaided pass
+  rate with `max_turns=5` — the headroom the earlier repos lacked. Full writeup
+  and raw data in `docs/experiments/`.
 
-  | arm | passed | ran out of turns | mean $ |
-  |-----|--------|------------------|--------|
-  | no lesson | 12/20 | 1/20 | 0.051 |
-  | scribe's lessons | 15/20 | 0/20 | 0.066 |
-  | hand-written mechanism lesson | 8/20 | **9/20** | 0.048 |
+  | arm | passed | ran out of turns | wrong fix | $/trial |
+  |-----|--------|------------------|-----------|---------|
+  | no lesson | 74/150 (0.49) | 4 | 72 | 0.048 |
+  | scribe's lessons | **105/150 (0.70)** | 10 | 35 | 0.056 |
+  | hand-written mechanism lesson | 88/150 (0.59) | **45** | 17 | 0.041 |
 
-  On the question asked — do lessons improve outcomes — the answer is still no
-  evidence either way: +15pp for the scribe's lessons at p=0.50, −20pp for the
-  hand-written one at p=0.34. Detecting a 15pp difference here needs roughly
-  n=150 per arm; n=20 cannot see it, and batch-to-batch swings were large (the
-  upper-bound arm went 2/10 then 6/10).
+  **Lessons work: +20.7pp over control, p = 0.0004.** The mechanism is legible in
+  the failure modes — both lessons cut wrong fixes sharply (72 → 35, p = 1.2e-5;
+  72 → 17, p < 1e-6), which is the diagnostic value. But the hand-written lesson,
+  which states the answer outright and reduces wrong fixes most, pushes 45/150
+  runs into turn exhaustion with nothing written (p < 1e-4 against either other
+  arm), and the two effects nearly cancel: +9.3pp, p = 0.13. The scribe's shorter
+  lessons capture most of the diagnostic benefit without spending the budget to
+  get it.
 
-  What *did* come out significant is worth more than the null: **a more detailed
-  lesson can cost you the run.** The prescriptive mechanism lesson sent agents
-  into investigation they could not finish, exhausting the turn budget with
-  nothing written in 9/20 runs against 1/20 without it (p=0.008) and 0/20 with
-  the scribe's shorter ones (p=0.001). Lesson length trades against the turn
-  budget, and the naive assumption — better lesson, better outcome — is the one
-  the data actually contradicts.
+  So the naive expectation — a more detailed lesson is a better lesson — is the
+  one thing the data contradicts. Lesson length trades against the turn budget.
+  Note also that the earlier n=20 pilot of this same experiment showed +15pp at
+  p=0.50 and concluded nothing; it was underpowered exactly as predicted, and an
+  n=20 result on a 20pp effect is not evidence of absence.
 
-  One incidental finding across all 80 trials in this playbook: under a
+  One incidental finding across all 530 trials in this playbook: under a
   check-based reward, nothing ever deleted a failing test to go green.
 
   Patch selection is live too (3 candidates from 3 briefs, all re-verified,
