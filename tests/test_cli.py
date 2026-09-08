@@ -9,11 +9,24 @@ from __future__ import annotations
 
 import pathlib
 import subprocess
+import tempfile
 
 import pytest
 
 from tactics.cli import build_parser, main
 from tactics.playbooks.agent_sdk import AgentRun
+
+
+@pytest.fixture(autouse=True)
+def _keep_temporary_files_out_of_the_real_tmp(tmp_path, monkeypatch):
+    """A --no-persist run archives its patches under the system temp directory.
+
+    That is right in production and litter in a test suite, so point the whole
+    module somewhere disposable. Worktree roots follow it too, which is a bonus.
+    """
+    home = tmp_path / "tmp"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(home))
 
 
 def _repo(tmp_path, name="repo") -> str:
@@ -235,6 +248,51 @@ def test_no_such_warning_when_the_repo_ignores_its_artifacts(tmp_path, capsys):
     subprocess.run(["git", "-C", repo, "commit", "-qm", "ignore"], check=True, capture_output=True)
     main(_argv(repo, "--dry-run"), runner=_runner())
     assert "no .gitignore" not in capsys.readouterr().err
+
+
+# --- the candidates outlive the run -------------------------------------------
+
+
+def test_patches_are_archived_under_the_repo_by_default(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    main([repo, "do the thing", "--check", "test -f work.txt", "--no-learn", "--yes"],
+         runner=_runner())
+    saved = sorted(pathlib.Path(repo, ".tactics", "patches").rglob("*.patch"))
+    assert len(saved) == 1
+    assert "work.txt" in saved[0].read_text()
+    out = capsys.readouterr().out
+    assert "saved to" in out and "git apply --3way" in out
+
+
+def test_no_persist_still_keeps_the_work_just_not_in_your_repo(tmp_path, capsys):
+    # --no-persist is about not writing your repository. Throwing the candidates
+    # away instead would be a different, worse promise.
+    repo = _repo(tmp_path)
+    main(_argv(repo, "--yes"), runner=_runner())
+    assert not pathlib.Path(repo, ".tactics").exists()
+    saved = sorted((tmp_path / "tmp").rglob("*.patch"))
+    assert len(saved) == 1 and "work.txt" in saved[0].read_text()
+    assert f"saved to {saved[0].parent}" in capsys.readouterr().out
+
+
+def test_patch_dir_puts_them_where_you_asked(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    where = tmp_path / "elsewhere"
+    main(_argv(repo, "--yes", "--patch-dir", str(where)), runner=_runner())
+    assert [f.name for f in sorted(where.glob("*.patch"))] == ["001-SingleAgentNarrow.patch"]
+    assert str(where) in capsys.readouterr().out
+
+
+def test_an_archived_patch_applies_with_plain_git(tmp_path):
+    # The recovery path for a run that died: nothing survives but the file.
+    repo = _repo(tmp_path)
+    where = tmp_path / "elsewhere"
+    main(_argv(repo, "--yes", "--patch-dir", str(where)), runner=_runner())
+    saved = sorted(where.glob("*.patch"))[0]
+    done = subprocess.run(["git", "-C", repo, "apply", "--3way", str(saved)],
+                          capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert pathlib.Path(repo, "work.txt").read_text() == "done\n"
 
 
 # --- you cannot review what you cannot see ------------------------------------

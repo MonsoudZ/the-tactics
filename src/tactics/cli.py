@@ -30,6 +30,8 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
+import time
 from typing import Any
 
 from .core.approval import AutoApprove, DryRun, PolicyGate
@@ -156,7 +158,27 @@ def build_parser() -> argparse.ArgumentParser:
                    help="do not read or write <repo>/.tactics (memory and lessons)")
     p.add_argument("--no-learn", action="store_true",
                    help="skip the scribe; run without distilling lessons afterwards")
+    p.add_argument("--patch-dir", default=None, metavar="DIR",
+                   help="where to archive each patch as it is produced "
+                        "(default: <repo>/.tactics/patches/<run>)")
     return p
+
+
+def _patch_dir(args, repo: str) -> str:  # noqa: ANN001
+    """A directory of its own per run, so one run never overwrites another's.
+
+    Each run's candidates are separate answers, sometimes to a different task
+    entirely; flattening them into one folder would silently lose the earlier
+    set. Under ``--no-persist`` the repository stays untouched, so the archive
+    goes to a temporary directory instead of being thrown away — the flag is
+    about not writing your repo, not about discarding the work.
+    """
+    if args.patch_dir:
+        return os.path.abspath(os.path.expanduser(args.patch_dir))
+    stamp = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{os.getpid()}"
+    if args.no_persist:
+        return os.path.join(tempfile.gettempdir(), "tactics-patches", stamp)
+    return os.path.join(repo, ".tactics", "patches", stamp)
 
 
 def main(argv: list[str] | None = None, *, runner=None) -> int:  # noqa: ANN001
@@ -177,8 +199,8 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:  # noqa: ANN001
             else AutoApprove() if args.yes
             else PolicyGate(escalate=_ask, allow_risk=_ROUTINE))
 
-    workspace = AgentWorkspace(repo, check=check, isolate=True,
-                               runner=runner, model=args.model)
+    workspace = AgentWorkspace(repo, check=check, isolate=True, runner=runner,
+                               model=args.model, patch_dir=_patch_dir(args, repo))
     colony = build_delivery_colony(
         workspace,
         gate=gate,
@@ -233,6 +255,18 @@ def _report(args, workspace, result, lessons, client, why, gate) -> int:  # noqa
     for patch in patches:
         print(f"  from {patch.tactic or patch.task:<18} "
               f"{len(patch.text.splitlines())} diff lines  {patch.files}")
+
+    # Where they went. Each was written before its worktree was destroyed, so
+    # this holds even for the run that never got as far as printing a report.
+    saved = [p for p in patches if p.saved_to]
+    if saved:
+        print(f"\nsaved to {os.path.dirname(saved[0].saved_to)}")
+        for patch in saved:
+            print(f"  {os.path.basename(patch.saved_to)}"
+                  f"   git apply --3way {shlex.quote(patch.saved_to)}")
+    elif patches:
+        print(f"\nwarning: could not write to {workspace.patch_dir}; "
+              "the patches below are the only copy", file=sys.stderr)
 
     if args.show_diff and patches:
         # Printed in full and not truncated: the worktree that produced this is

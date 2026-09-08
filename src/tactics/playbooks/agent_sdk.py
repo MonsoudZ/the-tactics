@@ -294,6 +294,7 @@ class Patch:
     text: str
     files: list[str] = field(default_factory=list)
     tactic: str = ""
+    saved_to: str = ""          # where it was archived, if a patch_dir was given
 
     def __bool__(self) -> bool:
         return bool(self.text.strip())
@@ -445,11 +446,16 @@ class AgentWorkspace(Target):
         shell: Callable[[list[str]], tuple[int, str]] | None = None,
         model: str | None = None,
         isolate: bool = False,
+        patch_dir: str | None = None,
     ) -> None:
         self.path = path
         self.check = list(check) if check else ["python3", "-m", "pytest", "-q"]
         self.model = model
         self.isolate = isolate
+        # Where to archive each patch as it is lifted out. Without this the only
+        # copy of an ant's work lives in memory until the run returns, so a run
+        # that is killed, crashes, or dies on its budget takes the work with it.
+        self.patch_dir = patch_dir
         self._runner = runner or _sdk_runner
         self._custom_shell = shell is not None
         self._shell = shell or self._subprocess
@@ -552,14 +558,48 @@ class AgentWorkspace(Target):
             self.patches = []
 
     def release(self, session: "Target") -> None:
-        """Lift the work out as a patch, then remove the worktree."""
+        """Lift the work out as a patch, archive it, then remove the worktree.
+
+        The order is the point. Until this runs, the only copy of an ant's work
+        is the worktree that is about to be destroyed; after it, the only copy
+        is a list in memory that a killed run never returns. So the patch is
+        written to ``patch_dir`` *before* the worktree goes, and the run has to
+        survive nothing in particular for the work to be recoverable.
+        """
         if session is self or not isinstance(session, AgentWorkspace):
             return
         patch = session.pending_patch or session.capture_patch()
-        with self._lock:
-            if patch:
+        if patch:
+            with self._lock:
                 self.patches.append(patch)
+                index = len(self.patches)
+            self._save_patch(patch, index)
         self.run(["git", "worktree", "remove", "--force", session.path])
+
+    def _save_patch(self, patch: Patch, index: int) -> None:
+        """Write one patch to ``patch_dir``. Never costs the caller its work.
+
+        Fail-soft on purpose: an unwritable directory is a lost archive copy,
+        and turning that into an exception here would lose the patch itself —
+        the opposite of the point. ``saved_to`` stays empty so a caller can say
+        so rather than implying a file exists.
+        """
+        if not self.patch_dir:
+            return
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "-", patch.tactic or patch.task or "patch").strip("-")
+        try:
+            os.makedirs(self.patch_dir, exist_ok=True)
+            dest = os.path.join(self.patch_dir, f"{index:03d}-{stem or 'patch'}.patch")
+            # Never clobber: a second run pointed at the same directory is a
+            # second set of answers, not a correction of the first.
+            if os.path.exists(dest):
+                dest = f"{dest[:-6]}-{uuid.uuid4().hex[:6]}.patch"
+            text = patch.text if patch.text.endswith("\n") else patch.text + "\n"
+            with open(dest, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except OSError:
+            return
+        patch.saved_to = dest
 
     def capture_patch(self) -> Patch:
         """The full diff of this workspace, including files the agent created."""

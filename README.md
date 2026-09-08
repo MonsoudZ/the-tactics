@@ -48,8 +48,12 @@ apply: landed WriteTestFirst (smallest verified diff)
 A candidate is not an answer: the verification line says whether your check
 actually passed, because a listed patch with a confident summary behind it is
 the exact failure this guards. `--show-diff` prints each candidate in full and
-deliberately untruncated — the worktree that produced it is destroyed when the
-run ends, so what is on screen is the only copy there is.
+deliberately untruncated.
+
+Each patch is written to `<repo>/.tactics/patches/<run>/` the moment it is
+lifted out, *before* its worktree is destroyed — so a run that is interrupted,
+crashes, or dies on its budget still leaves its candidates on disk, ready for
+`git apply --3way`. `--patch-dir` puts them somewhere else.
 
 Three postures, and the default is the careful one: agents edit and run commands
 freely inside their own worktrees, but anything irreversible — a push, an

@@ -190,8 +190,20 @@ The report says what the *check* found, not what the agent claimed: a live run
 listed a candidate patch adding two unused helpers as though it worked, because
 the output named the patch and never named the verdict. So the `verify` journal
 events are printed per ant. `--show-diff` prints each candidate in full and does
-not truncate — the worktree that produced it is gone by then, so the terminal
-holds the only copy.
+not truncate — the worktree that produced it is gone by then.
+
+**Patches are archived before the worktree is destroyed** (verified live: a run
+`kill -9`'d mid-flight printed no report at all, and its patch was on disk,
+applied with plain `git apply --3way`, and turned the repo green). Ordering is
+the whole feature: until `release` runs the only copy is a worktree about to be
+deleted, and after it the only copy is a list in memory that a killed run never
+returns. `AgentWorkspace(patch_dir=...)` names the directory; the CLI gives each
+run its own (`<repo>/.tactics/patches/<stamp>`, or a temp dir under
+`--no-persist` — that flag means *do not write your repo*, not *throw the work
+away*), never clobbers an existing file, and is fail-soft: an unwritable archive
+costs the copy, never the patch, and `saved_to` stays empty so the report can
+say so rather than imply a file exists. A hard kill still leaks the worktree
+itself — `git worktree prune` clears it — but no longer the work.
 
 **Fan-out (verified live: 3 agents, 62s, 3 *distinct* patches, main repo
 untouched).** Set `AgentWorkspace(isolate=True)` and `max_workers > 1`; the

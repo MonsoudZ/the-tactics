@@ -645,6 +645,102 @@ def test_release_lifts_the_work_out_as_a_patch_then_removes_the_worktree(tmp_pat
         ws.cleanup()
 
 
+# --- the work outlives the run ------------------------------------------------
+
+
+def test_a_patch_is_written_to_disk_before_its_worktree_is_destroyed(tmp_path):
+    # Until release runs, the only copy is the worktree; after it, the only copy
+    # is a list in memory a killed run never returns. So it must go to disk in
+    # between — asserted on the *ordering*, not just the end state.
+    archive = tmp_path / "archive"
+    ws = AgentWorkspace(_git_repo(tmp_path), isolate=True, patch_dir=str(archive))
+    saved_when_removed = []
+    real_run = ws.run
+
+    def watching(cmd):
+        if cmd[:3] == ["git", "worktree", "remove"]:
+            saved_when_removed.append(sorted(f.name for f in archive.glob("*.patch")))
+        return real_run(cmd)
+
+    ws.run = watching
+    try:
+        session = ws.session(None)
+        session.produced_by = "WriteTestFirst"
+        pathlib.Path(session.path, "new.txt").write_text("hello\n")
+        ws.release(session)
+    finally:
+        ws.run = real_run
+        ws.cleanup()
+
+    assert saved_when_removed == [["001-WriteTestFirst.patch"]]
+    assert "hello" in (archive / "001-WriteTestFirst.patch").read_text()
+    assert ws.patches[0].saved_to == str(archive / "001-WriteTestFirst.patch")
+
+
+def test_the_saved_file_is_a_patch_you_can_actually_apply(tmp_path):
+    # An archive you cannot apply is a log, not a recovery.
+    archive = tmp_path / "archive"
+    repo = _git_repo(tmp_path)
+    ws = AgentWorkspace(repo, isolate=True, patch_dir=str(archive))
+    try:
+        session = ws.session(None)
+        pathlib.Path(session.path, "recovered.txt").write_text("from the ant\n")
+        ws.release(session)
+        saved = ws.patches[0].saved_to
+    finally:
+        ws.cleanup()
+
+    # Nothing of the run survives but the file. Land it with plain git.
+    done = subprocess.run(["git", "-C", repo, "apply", "--3way", saved],
+                          capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert pathlib.Path(repo, "recovered.txt").read_text() == "from the ant\n"
+
+
+def test_a_second_run_does_not_overwrite_the_first_ones_answers(tmp_path):
+    archive = tmp_path / "archive"
+    repo = _git_repo(tmp_path)
+    for body in ("first\n", "second\n"):
+        ws = AgentWorkspace(repo, isolate=True, patch_dir=str(archive))
+        try:
+            session = ws.session(None)
+            pathlib.Path(session.path, "answer.txt").write_text(body)
+            ws.release(session)
+        finally:
+            ws.cleanup()
+
+    bodies = sorted(f.read_text() for f in archive.glob("*.patch"))
+    assert len(bodies) == 2
+    assert any("first" in b for b in bodies) and any("second" in b for b in bodies)
+
+
+def test_an_unwritable_archive_costs_the_copy_not_the_patch(tmp_path):
+    # Fail-soft: raising here would lose the very thing being protected.
+    blocked = tmp_path / "not-a-dir"
+    blocked.write_text("a file, so makedirs cannot use it as a directory\n")
+    ws = AgentWorkspace(_git_repo(tmp_path), isolate=True, patch_dir=str(blocked))
+    try:
+        session = ws.session(None)
+        pathlib.Path(session.path, "still_here.txt").write_text("work\n")
+        ws.release(session)
+        assert len(ws.patches) == 1
+        assert "still_here.txt" in ws.patches[0].text
+        assert ws.patches[0].saved_to == ""   # and it does not claim otherwise
+    finally:
+        ws.cleanup()
+
+
+def test_no_patch_dir_means_nothing_is_written(tmp_path):
+    ws = AgentWorkspace(_git_repo(tmp_path), isolate=True)
+    try:
+        session = ws.session(None)
+        pathlib.Path(session.path, "new.txt").write_text("x\n")
+        ws.release(session)
+        assert ws.patches[0].saved_to == ""
+    finally:
+        ws.cleanup()
+
+
 def test_a_session_that_changed_nothing_produces_no_patch(tmp_path):
     ws = AgentWorkspace(_git_repo(tmp_path), isolate=True)
     try:
