@@ -192,6 +192,29 @@ the output named the patch and never named the verdict. So the `verify` journal
 events are printed per ant. `--show-diff` prints each candidate in full and does
 not truncate — the worktree that produced it is gone by then.
 
+The same failure had two more faces, both found by asking what a first-time user
+sees. **A run that never started looked exactly like one that found nothing to
+do**: with the SDK not installed, `1 run(s), $0.00 spent, 0 file(s)` and
+`nothing to apply` — the error was in the journal the whole time and simply
+never printed. It prints now, and when *every* run errored the report says so
+plainly, names the fix where it can recognise one (`pip install
+'tactics[agent-sdk]'`, or authenticate), and exits 2 rather than 1, because
+nothing ran at all is not the same answer as ran and found nothing. And **the
+critic said "check re-run confirms the fix" whenever the check passed**, empty
+diff included — so on an already-green repo every ant confirmed a fix that did
+not exist. A pass over an empty diff now says exactly that. The reward was
+always right; only the sentence lied.
+
+**The default posture's prompt is serialized** (`_PROMPT`). `_ask` is reached
+from each ant's own thread, so with `--agents` above one and no lock several
+agents read the same stdin at once: prompts interleave and a "y" meant for one
+is delivered to whichever thread is reading — an approval given for the wrong
+action, which is the one thing a gate must never do. It also names what is being
+asked for (`agent tool call: Bash  rm -rf build`), since the tool name alone is
+not a question anyone can answer, and refuses on EOF rather than guessing.
+Verified live: a real agent's `rm -rf build` escalated, printed the command, and
+was refused for want of a terminal.
+
 **Patches are archived before the worktree is destroyed** (verified live: a run
 `kill -9`'d mid-flight printed no report at all, and its patch was on disk,
 applied with plain `git apply --3way`, and turned the repo green). Ordering is

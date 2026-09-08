@@ -31,6 +31,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import tempfile
 import time
 from typing import Any
@@ -101,13 +102,36 @@ def _read(path: str) -> str:
         return ""
 
 
+_PROMPT = threading.Lock()
+
+
+def _describe(proposal) -> str:  # noqa: ANN001
+    """What is actually being asked for — "tool call: Bash" is not a question."""
+    detail = getattr(proposal, "detail", None) or {}
+    what = detail.get("command") or detail.get("file_path") or ""
+    return f"{proposal.action}{f'  {what}' if what else ''}"
+
+
 def _ask(proposal, ctx) -> bool:  # noqa: ANN001
-    """Escalation for the default posture: prompt at a terminal, refuse otherwise."""
+    """Escalation for the default posture: prompt at a terminal, refuse otherwise.
+
+    Serialized, because this is reached from each ant's own thread. With
+    ``--agents`` above one and no lock, several agents read the same stdin at
+    once: the prompts interleave into one unreadable line and a "y" meant for
+    one of them is delivered to whichever thread happens to be reading — an
+    approval given for the wrong action, which is the one outcome a gate must
+    never produce. One question at a time, and the others wait.
+    """
     if not sys.stdin.isatty():
-        print(f"  refused (no terminal to ask): {proposal.action}", file=sys.stderr)
+        print(f"  refused (no terminal to ask): {_describe(proposal)}", file=sys.stderr)
         return False
-    answer = input(f"  approve? {proposal.action}  [y/N] ").strip().lower()
-    return answer in ("y", "yes")
+    with _PROMPT:
+        try:
+            answer = input(f"  approve? {_describe(proposal)}  [y/N] ")
+        except EOFError:        # stdin closed under us — refuse, do not guess
+            print("  refused (stdin closed)", file=sys.stderr)
+            return False
+    return answer.strip().lower() in ("y", "yes")
 
 
 def _scribe_client() -> tuple[Any, str]:
@@ -163,6 +187,16 @@ def build_parser() -> argparse.ArgumentParser:
                    help="where to archive each patch as it is produced "
                         "(default: <repo>/.tactics/patches/<run>)")
     return p
+
+
+def _diagnose(errors: list[str]) -> str:
+    """Turn the agent's error into the thing to actually do about it, if we can."""
+    joined = " ".join(errors).lower()
+    if "not installed" in joined or "no module named" in joined:
+        return "pip install 'tactics[agent-sdk]'"
+    if ("api key" in joined) or "unauthorized" in joined or "401" in joined:
+        return "authenticate the Claude CLI, or set ANTHROPIC_API_KEY"
+    return ""
 
 
 def _catch_terminate():
@@ -272,6 +306,19 @@ def _report(args, workspace, result, lessons, client, why, gate) -> int:  # noqa
     for e in runs:
         print(f"  {e.data['tactic']:<18} ${e.data.get('cost_usd', 0):<7} "
               f"{e.data.get('changed_files', 0)} file(s)")
+        # A run that never started looked exactly like a run that found nothing
+        # to do: same shape, $0.00, no patch. The error was in the journal all
+        # along and simply never printed.
+        if e.data.get("error"):
+            print(f"      failed: {e.data['error']}")
+
+    failures = [e.data["error"] for e in runs if e.data.get("error")]
+    if runs and len(failures) == len(runs):
+        print("\nevery agent failed before doing any work — this is a setup "
+              "problem, not a result.")
+        hint = _diagnose(failures)
+        if hint:
+            print(f"  → {hint}")
 
     # Whether the check passed is the entire point, and listing candidates
     # without it reads as though every patch works. The critic re-ran the check
@@ -315,6 +362,9 @@ def _report(args, workspace, result, lessons, client, why, gate) -> int:  # noqa
         print(f"\n{len(lessons)} lesson(s) written to .tactics/ for next time:")
         for lesson in lessons:
             print(f"  • {lesson.text}")
+
+    if runs and len(failures) == len(runs):
+        return 2                      # nothing ran; distinct from "ran, found nothing"
 
     if not patches:
         print("\nnothing to apply.")

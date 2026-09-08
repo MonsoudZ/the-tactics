@@ -36,7 +36,7 @@ posture AutoApprove   agents 2   budget $5.00
   WriteTestFirst     $0.0773  1 file(s)
 
 verification (your check, re-run against each agent's own tree):
-  SingleAgentNarrow  check still fails after the run
+  SingleAgentNarrow  check re-run confirms it is still failing
   WriteTestFirst     check re-run confirms the fix
 
 1 candidate patch(es); your repository is untouched

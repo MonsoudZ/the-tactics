@@ -1244,12 +1244,17 @@ def verification_critic() -> FunctionCritic:
             return Verdict(accepted=False, reason="claimed failure but check passes")
         # The task here is "make this work", not "have a go at it": a verified
         # failure is trusted and learned from, and goes back on the board.
-        return Verdict(
-            accepted=True,
-            done=outcome.success,
-            reason="check re-run confirms the fix" if passed
-                   else "check re-run confirms it is still failing",
-        )
+        # Say what was measured, not what would be flattering. A check that
+        # passes over an empty diff is the repo being green already (or an agent
+        # that never ran), and calling that "the fix" is the self-report this
+        # whole playbook exists to distrust.
+        if not passed:
+            reason = "check re-run confirms it is still failing"
+        elif outcome.metrics.get("changed_files"):
+            reason = "check re-run confirms the fix"
+        else:
+            reason = "check passes, but the agent changed nothing"
+        return Verdict(accepted=True, done=outcome.success, reason=reason)
 
     return FunctionCritic(verify)
 

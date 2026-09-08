@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pathlib
 import subprocess
+import sys
 import tempfile
 
 import pytest
@@ -248,6 +249,160 @@ def test_no_such_warning_when_the_repo_ignores_its_artifacts(tmp_path, capsys):
     subprocess.run(["git", "-C", repo, "commit", "-qm", "ignore"], check=True, capture_output=True)
     main(_argv(repo, "--dry-run"), runner=_runner())
     assert "no .gitignore" not in capsys.readouterr().err
+
+
+# --- the gate has to be askable ------------------------------------------------
+
+
+class _Proposal:
+    def __init__(self, action="agent tool call: Bash", **detail):
+        self.action = action
+        self.detail = detail
+        self.reversible = False
+        self.risk = "high"
+
+
+def test_with_no_terminal_the_escalation_refuses(tmp_path, monkeypatch, capsys):
+    from tactics.cli import _ask
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
+    assert _ask(_Proposal(command="git push --force"), None) is False
+    assert "refused (no terminal to ask)" in capsys.readouterr().err
+
+
+def test_the_prompt_names_the_command_not_just_the_tool(tmp_path, monkeypatch):
+    # "approve? agent tool call: Bash" is not a question anybody can answer.
+    from tactics.cli import _ask
+
+    asked = []
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr("builtins.input", lambda prompt: asked.append(prompt) or "y")
+    assert _ask(_Proposal(command="rm -rf build/"), None) is True
+    assert "rm -rf build/" in asked[0]
+
+
+@pytest.mark.parametrize("answer,approved", [("y", True), ("yes", True), ("Y", True),
+                                             ("n", False), ("", False), ("maybe", False)])
+def test_only_yes_means_yes(monkeypatch, answer, approved):
+    from tactics.cli import _ask
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr("builtins.input", lambda prompt: answer)
+    assert _ask(_Proposal(), None) is approved
+
+
+def test_closed_stdin_refuses_rather_than_guessing(monkeypatch, capsys):
+    from tactics.cli import _ask
+
+    def closed(prompt):
+        raise EOFError
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr("builtins.input", closed)
+    assert _ask(_Proposal(), None) is False
+    assert "stdin closed" in capsys.readouterr().err
+
+
+def test_parallel_agents_do_not_share_one_prompt(monkeypatch):
+    # This is reached from each ant's own thread. Unserialized, several agents
+    # read the same stdin at once and an approval meant for one arrives at
+    # another — a yes given for the wrong action.
+    import threading
+    import time
+
+    from tactics.cli import _ask
+
+    inside = []
+    overlapped = []
+
+    def slow_input(prompt):
+        inside.append(prompt)
+        if len(inside) > 1:
+            overlapped.append(prompt)
+        time.sleep(0.02)
+        inside.pop()
+        return "y"
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr("builtins.input", slow_input)
+    threads = [threading.Thread(target=_ask, args=(_Proposal(command=f"cmd {i}"), None))
+               for i in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert overlapped == []
+
+
+# --- a failure has to look like one -------------------------------------------
+
+
+def _broken_runner(message):
+    def runner(brief, spec, bridge, ws):
+        return AgentRun(cost_usd=0.0, error=message)
+
+    return runner
+
+
+def test_a_run_that_never_started_says_why(tmp_path, capsys):
+    # The first-run state for most people: the SDK is not installed. This used
+    # to print "1 run, $0.00, 0 file(s)" and "nothing to apply" — indistinguishable
+    # from an agent that looked around and found nothing to do.
+    repo = _repo(tmp_path)
+    code = main(_argv(repo, "--yes"),
+                runner=_broken_runner("claude-agent-sdk not installed: No module named X"))
+    out = capsys.readouterr().out
+    assert "claude-agent-sdk not installed" in out
+    assert "setup problem, not a result" in out
+    assert "pip install 'tactics[agent-sdk]'" in out
+    assert code == 2                              # not 1: nothing ran at all
+
+
+def test_an_auth_failure_says_what_to_do_about_it(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    main(_argv(repo, "--yes"), runner=_broken_runner("401 unauthorized"))
+    assert "authenticate the Claude CLI" in capsys.readouterr().out
+
+
+def test_an_unrecognised_failure_is_still_shown_verbatim(tmp_path, capsys):
+    # No hint is better than a wrong hint, but the error itself always prints.
+    repo = _repo(tmp_path)
+    main(_argv(repo, "--yes"), runner=_broken_runner("the moon was in the wrong phase"))
+    out = capsys.readouterr().out
+    assert "the moon was in the wrong phase" in out
+    assert "pip install" not in out
+
+
+def test_one_failure_among_several_is_not_a_setup_problem(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    calls = []
+
+    def flaky(brief, spec, bridge, ws):
+        calls.append(brief)
+        if len(calls) == 1:
+            return AgentRun(cost_usd=0.0, error="transient explosion")
+        return _runner()(brief, spec, bridge, ws)
+
+    code = main(_argv(repo, "--yes", "--agents", "2"), runner=flaky)
+    out = capsys.readouterr().out
+    assert "transient explosion" in out           # still reported
+    assert "setup problem" not in out             # but not diagnosed as one
+    assert code == 0                              # the other agent delivered
+
+
+def test_a_check_that_passes_over_an_empty_diff_does_not_claim_a_fix(tmp_path, capsys):
+    # An already-green repo. Every ant "confirming the fix" here is the exact
+    # self-report this playbook refuses to trust, just phrased politely.
+    repo = _repo(tmp_path)
+
+    def idle(brief, spec, bridge, ws):
+        return AgentRun(cost_usd=0.01)            # touches nothing
+
+    main([repo, "do the thing", "--check", "true", "--no-learn", "--no-persist",
+          "--yes"], runner=idle)
+    out = capsys.readouterr().out
+    assert "check passes, but the agent changed nothing" in out
+    assert "confirms the fix" not in out
 
 
 # --- and the leavings do not ---------------------------------------------------
