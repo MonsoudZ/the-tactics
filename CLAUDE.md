@@ -641,6 +641,36 @@ scrutiny: as first written, `# TODO: expose current_streak` satisfied "the
 column appears in the serializer", so it now requires the column as an emitted
 key. A gauge a comment can satisfy is a gauge, not a measurement.
 
+**The loop compounds — the machinery, verified; the improvement, not claimed.**
+Three report-driven runs on a real Rails app, same kind of task each time
+(`expose stored data`), nothing applied so the repository was byte-identical at
+the start of all three and only memory differed. All three verified. What that
+established:
+
+* **Numeric memory accumulated.** UCB explored as it should — PlanThenPatch,
+  then ReviewedSwarm, then SingleAgentNarrow — so all four briefs now carry a
+  record. Which matters because "it picked the winner" means nothing until
+  every brief has one.
+* **The scribe wrote its first lessons in real use**, with no API key, which is
+  the whole point of `SdkClient`. One is genuinely comparative and the kind of
+  thing only a scoreboard could produce: *ReviewedSwarm's code-reviewer subagent
+  issued 15+ Bash gate calls reviewing one task, driving cost to $0.43 for a
+  single verified change*.
+* **Recall is proven rather than assumed.** A fresh brief built afterwards opens
+  with "What past runs on this repository learned:" and carries both.
+
+What it does **not** show: cost fell $0.51 → $0.43 → $0.30 across the three, and
+that is confounded — three different briefs of different intrinsic cost on three
+different serializers. It is not evidence of learning and is not offered as any.
+The "do lessons help" question was answered properly at n=450 above; three runs
+would not confirm it and are not asked to.
+
+The unplanned finding: the second lesson records that the agent attempted
+**`ScheduleWakeup`**, a tool named in no config anywhere in the container, and
+that `GateBridge` denied it as outside the brief's roster. Fail-closed
+enforcement catching a tool nobody anticipated, and the scribe surfacing it —
+both working on something neither was designed against.
+
 **It found a real production bug on its first honest run.** The gap list said
 `POST /api/v1/tasks/batch` was served with no spec mentioning it — the only
 mutation endpoint in the app with zero coverage. Probing it: every request
