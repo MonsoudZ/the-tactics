@@ -574,6 +574,47 @@ a tool wrote it is not work for a person.
 The pattern worth keeping: a finder that cries wolf gets ignored, so narrow
 beats clever, and a heuristic must be *named* as one where it can be wrong.
 
+### The report (v0.9) — `playbooks/report.py`, the front of the whole thing
+
+Point it at a repo and get back what the thing does, feature by feature, what is
+missing, and what could go. Everything downstream — tasks, agents, verification
+— should hang off this.
+
+**Every line traces to a file, and that constraint is the design.** A report
+that invents a feature is worse than no report: it reads exactly like one that
+was careful, and it will be believed. So `inventory()` only extracts. Routes
+come from the *booted* router, because `resources :tasks` expands to seven
+routes and a regex over routes.rb reports one; if the app cannot boot, the
+routes are empty and the report says so rather than listing plausible ones.
+Features are the routes — that is what an application *does* — and models,
+services, jobs and policies attach to them, with whatever attaches to nothing
+listed as support code. A gap is an *absence the repo's own conventions make
+visible* (an endpoint no spec mentions, an action opting out of the
+authorization check its siblings use, a model with no policy in a Pundit app),
+never "this code is bad": absence is checkable, taste is not.
+
+`describe()` is the one part that asks a model, is kept separate for exactly
+that reason, is given only the extracted facts, and is rendered as *narration*
+so a reader always knows which half they are reading. A model that cannot
+answer leaves the feature blank — silence beats invention.
+
+**Both false-positive classes came from the first real run** and are regression-
+tested. It reported 136 "features" for an app with 25 controllers, one per
+service file — a filing system pretending to be an understanding. And it
+collapsed `:id` to nothing when matching routes against specs, producing
+`/lists//tasks//complete`, which no spec contains, so eight thoroughly tested
+endpoints were reported untested. 65 gaps became 27.
+
+**It found a real production bug on its first honest run.** The gap list said
+`POST /api/v1/tasks/batch` was served with no spec mentioning it — the only
+mutation endpoint in the app with zero coverage. Probing it: every request
+returns 400 `Unsupported action: batch`, because `batch_params` permits
+`:action` while Rails' router has already set `params[:action] = "batch"` and
+path params win the merge, so `TaskBatchService` never receives the caller's
+`complete`/`delete`/`move`. Bulk actions had been broken for every client, and
+the absence of a test is exactly why nobody knew. The report did not guess; it
+noticed an absence, and the absence was load-bearing.
+
 - **The single `Agent` loop isolates tactic errors but not `observe()`/goal-predicate
   errors.** The `Colony` (the production path) isolates everything. Keep `Target.observe`
   and `Goal.is_satisfied` total/non-throwing.
