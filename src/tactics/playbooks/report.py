@@ -204,11 +204,31 @@ def _singular(word: str) -> str:
     return word
 
 
+def _tokens(text: str) -> list[str]:
+    return [_singular(t) for t in re.split(r"[_\-. ]", text) if t]
+
+
 def _matches(feature: str, path: str) -> bool:
-    """Does this file belong to this feature? Stem match, both directions."""
-    stem = _singular(feature.replace(" ", "_"))
-    target = _singular(os.path.splitext(os.path.basename(path))[0])
-    return bool(stem) and (stem in target or target.startswith(stem))
+    """Does this file belong to this feature? Token-wise, never substring.
+
+    Substring matching filed `jwt_denylist.rb` under the **lists** feature,
+    because "denylist" contains "list" — and the narration pass then dutifully
+    explained that lists tie authentication in via a JWT denylist. The model was
+    faithful to the facts it was given; the facts were wrong. Whole tokens only.
+    """
+    wanted = _tokens(feature)
+    have = set(_tokens(os.path.splitext(os.path.basename(path))[0]))
+    return bool(wanted) and all(token in have for token in wanted)
+
+
+def _best_match(features: dict, path: str):  # noqa: ANN001
+    """The most specific feature this file belongs to, if any.
+
+    `list_invite.rb` matches both *lists* and *list invites*; the longer name is
+    the better home, and taking whichever came first in a dict is not an answer.
+    """
+    hits = [(len(_tokens(name)), name) for name in features if _matches(name, path)]
+    return features[max(hits)[1]] if hits else None
 
 
 # --- the gaps -----------------------------------------------------------------
@@ -402,7 +422,7 @@ def inventory(root: str, *, routes: bool = True) -> Report:
         for kinds, attr in (("models", "models"), ("services", "services"),
                             ("jobs", "jobs"), ("policies", "policies")):
             for path in _under(root, "app", kinds):
-                home = next((f for n, f in buckets.items() if _matches(n, path)), None)
+                home = _best_match(buckets, path)
                 getattr(home or support, attr).append(path)
         for name, feature in buckets.items():
             feature.specs = sorted(p for p in specs if _matches(name, p))

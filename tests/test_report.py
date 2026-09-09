@@ -344,3 +344,37 @@ def test_only_scoreable_findings_reach_the_work_list():
                                  "app/serializers/user_serializer.rb")],
                     gaps=[Gap("model without policy", "no policy", "app/models/x.rb")])
     assert [j.kind for j in work(report)] == ["expose stored data"]
+
+
+# --- narration is only as good as the facts it is handed ----------------------
+
+
+def test_a_file_is_not_filed_by_substring(tmp_path):
+    # Found live by the narration pass: `jwt_denylist.rb` was filed under the
+    # *lists* feature because "denylist" contains "list", and the model then
+    # faithfully explained that lists tie authentication in via a JWT denylist.
+    # It described exactly what it was given. The facts were wrong.
+    from tactics.playbooks.report import _matches
+
+    assert not _matches("lists", "jwt_denylist.rb")
+    assert not _matches("lists", "blocklist.rb")
+    assert _matches("lists", "list_permissions.rb")
+    assert _matches("lists", "list.rb")
+
+
+def test_a_multi_word_feature_still_claims_its_own_files():
+    from tactics.playbooks.report import _matches
+
+    assert _matches("friend requests", "friend_request_policy.rb")
+    assert not _matches("friend requests", "request_logger.rb")
+
+
+def test_the_most_specific_feature_wins(tmp_path):
+    # `list_invite.rb` matches both "lists" and "list invites"; whichever came
+    # first in a dict is not an answer.
+    from tactics.playbooks.report import Feature, _best_match
+
+    buckets = {"lists": Feature(name="lists"), "list invites": Feature(name="list invites")}
+    assert _best_match(buckets, "app/models/list_invite.rb").name == "list invites"
+    assert _best_match(buckets, "app/models/list.rb").name == "lists"
+    assert _best_match(buckets, "app/models/task.rb") is None

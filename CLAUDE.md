@@ -598,6 +598,21 @@ that reason, is given only the extracted facts, and is rendered as *narration*
 so a reader always knows which half they are reading. A model that cannot
 answer leaves the feature blank — silence beats invention.
 
+**Live now, and it caught a bug in the extraction it was fed.** Six features of
+a real Rails app, no API key (`SdkClient`), and the narration is genuinely
+useful — it read seventeen task endpoints plus the recurrence services and
+reminder jobs and concluded the feature is "built for collaborative,
+deadline-driven task tracking". But under *lists* it also said authentication
+was tied in "via jwt_denylist", which cannot be true — and the model did not
+invent it. `_matches` was a substring test, so `jwt_denylist.rb` filed under
+**lists** because "deny*list*" contains "list", and the narration faithfully
+explained the facts it was handed. Matching is token-wise now, and the most
+specific feature wins (`list_invite.rb` belongs to *list invites*, not *lists*,
+and whichever came first in a dict was not an answer). The lesson generalises:
+**narration is a probe on your extraction.** A model told only true things can
+only say strange things when the facts are wrong, which makes it worth reading
+for what it says that could not possibly be so.
+
 **Both false-positive classes came from the first real run** and are regression-
 tested. It reported 136 "features" for an app with 25 controllers, one per
 service file — a filing system pretending to be an understanding. And it
