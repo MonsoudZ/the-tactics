@@ -90,6 +90,7 @@ class Report:
     kind: str                           # "rails" | "python" | "unknown"
     features: list[Feature] = field(default_factory=list)
     gaps: list[Gap] = field(default_factory=list)          # repo-wide
+    missing: list[Gap] = field(default_factory=list)        # what is not there yet
     removable: list[Any] = field(default_factory=list)     # survey Candidates
     stats: dict[str, Any] = field(default_factory=dict)
 
@@ -280,6 +281,94 @@ def python_gaps(root: str, specs: dict[str, str]) -> list[Gap]:
     return gaps
 
 
+# --- what is not there yet ----------------------------------------------------
+#
+# The hardest third, and the one where inventing is most tempting. The rule that
+# keeps it honest: a missing feature is the repository *contradicting itself* —
+# a resource whose siblings all offer delete and this one does not, a column
+# stored and never returned, an association nothing serves. The repo says what
+# it expects by what it does elsewhere, and that is checkable. "You should add
+# rate limiting" is taste, and taste belongs in narration where it is labelled.
+
+CRUD = ("index", "show", "create", "update", "destroy")
+
+
+def _schema_columns(root: str) -> dict[str, list[str]]:
+    """Table -> columns, read from the Rails schema. Generated, and authoritative."""
+    text = _read(root, os.path.join("db", "schema.rb"))
+    tables: dict[str, list[str]] = {}
+    table = None
+    for line in text.splitlines():
+        created = re.match(r'\s*create_table "(\w+)"', line)
+        if created:
+            table = created.group(1)
+            tables[table] = []
+            continue
+        column = re.match(r'\s*t\.\w+ "(\w+)"', line)
+        if table and column:
+            tables[table].append(column.group(1))
+        elif line.strip() == "end":
+            table = None
+    return tables
+
+
+#: Columns that are plumbing, not data anyone asked for. The second group is
+#: Devise's own schema: listing a user's failed_attempts as an unreturned
+#: feature buries the one that matters (current_streak) in framework noise.
+_INTERNAL = re.compile(r"^(id|created_at|updated_at|.*_id|encrypted_.*|.*_digest|"
+                       r".*_token|.*_count|deleted_at|discarded_at|lock_version|"
+                       r"confirmation_.*|confirmed_at|unconfirmed_email|jti|"
+                       r"reset_password_.*|remember_created_at|failed_attempts|"
+                       r"locked_at|current_sign_in_.*|last_sign_in_.*|sign_in_.*)$")
+
+
+def find_missing(root: str, endpoints: list[Endpoint]) -> list[Gap]:
+    """Absences the repository's own shape makes visible."""
+    out: list[Gap] = []
+
+    # 1. A resource whose siblings all offer an action and it does not. Only
+    #    for controllers already doing three of the five, so a single-purpose
+    #    controller is not badgered into being a CRUD resource.
+    by_controller: dict[str, set[str]] = defaultdict(set)
+    for endpoint in endpoints:
+        if not endpoint.controller.startswith("rails/"):
+            by_controller[endpoint.controller].add(endpoint.action)
+    for controller, actions in sorted(by_controller.items()):
+        present = [a for a in CRUD if a in actions]
+        if len(present) < 3:
+            continue
+        for action in CRUD:
+            if action not in actions:
+                out.append(Gap("incomplete resource",
+                               f"serves {', '.join(present)} but not {action}",
+                               controller, severity="low"))
+
+    # 2. A column stored and never returned. Data captured and unreachable is
+    #    either a feature that was never finished or a column to drop.
+    tables = _schema_columns(root)
+    serializers = {os.path.basename(p).replace("_serializer.rb", ""): _read(root, p)
+                   for p in _under(root, "app", "serializers")}
+    for name, text in serializers.items():
+        columns = tables.get(name + "s") or tables.get(name) or []
+        unexposed = [c for c in columns
+                     if not _INTERNAL.match(c) and not re.search(rf"\b{re.escape(c)}\b", text)]
+        if unexposed:
+            out.append(Gap("stored but never returned",
+                           f"{name}: {', '.join(sorted(unexposed))} "
+                           f"{'is' if len(unexposed) == 1 else 'are'} in the table and in no "
+                           "serializer — an unfinished feature, or a column to drop",
+                           f"app/serializers/{name}_serializer.rb", severity="medium"))
+
+    # There was a third finder here — "has_many :x with no route serving x" —
+    # and it is gone because association names and route names need not
+    # correspond. `has_many :recent_searches` is served at /searches/recent,
+    # `calendar_events` at /calendar, `friendships` at /friends. Matching
+    # literally reported eighteen absences of which roughly none were real,
+    # and most of the rest were aliases (`class_name: "List"`) or join tables.
+    # The mapping is not mechanically derivable, so this belongs in narration.
+    return out
+
+
 # --- assembling ---------------------------------------------------------------
 
 
@@ -337,6 +426,8 @@ def inventory(root: str, *, routes: bool = True) -> Report:
             feature.specs = sorted(p for p in specs if _matches(name, p))
         report.features = sorted(buckets.values(), key=lambda f: f.name)
 
+    if kind == "rails":
+        report.missing = find_missing(root, endpoints)
     report.removable = survey(root)
     report.stats = {
         "files": len(code_files(root)),
@@ -402,6 +493,23 @@ def render(report: Report, *, limit: int = 0) -> str:
         w("|---|---|---|---|")
         for gap in gaps:
             w(f"| {gap.severity} | {gap.kind} | `{gap.where}` | {gap.detail} |")
+    w("")
+
+    w("## What is not there yet")
+    w("")
+    w("Each of these is the repository contradicting itself — an action its "
+      "siblings offer, a column it stores and never returns, an association "
+      "nothing serves. What *ought* to exist beyond that is a matter of "
+      "judgement, and appears only as narration.")
+    w("")
+    if not report.missing:
+        w("Nothing. Every resource is complete, every column is reachable, every "
+          "association is served.")
+    else:
+        w("| kind | where | detail |")
+        w("|---|---|---|")
+        for gap in sorted(report.missing, key=lambda g: g.kind):
+            w(f"| {gap.kind} | `{gap.where}` | {gap.detail} |")
     w("")
 
     w("## What could go")

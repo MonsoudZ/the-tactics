@@ -605,6 +605,26 @@ collapsed `:id` to nothing when matching routes against specs, producing
 `/lists//tasks//complete`, which no spec contains, so eight thoroughly tested
 endpoints were reported untested. 65 gaps became 27.
 
+**What is not there yet** is the third section, and the one where inventing is
+most tempting. The rule that keeps it honest: a missing feature is *the
+repository contradicting itself* — an action its siblings all offer, a column it
+stores and never returns. Two finders survive that bar. `incomplete resource`
+compares a controller against the CRUD its siblings do (only where three of five
+are already present, so a single-purpose controller is not badgered into being a
+resource). `stored but never returned` diffs the schema against the serializers,
+skipping plumbing *and Devise's own columns*, which otherwise bury the one that
+matters under six of their own. A third finder — `has_many :x` with no route
+serving x — was **written and deleted**: association names and route names need
+not correspond (`recent_searches` is served at `/searches/recent`,
+`calendar_events` at `/calendar`), so it reported eighteen absences of which
+roughly none were real. That mapping is not mechanically derivable, so it
+belongs in narration. Anything beyond these is taste, and taste is labelled.
+
+On a real app it found a **fully built feature with no API surface**: three
+streak columns, a 120-line StreakService and a job enqueued on every task
+completion, and not one mention of "streak" in any serializer or controller. No
+client could ever see it.
+
 **It found a real production bug on its first honest run.** The gap list said
 `POST /api/v1/tasks/batch` was served with no spec mentioning it — the only
 mutation endpoint in the app with zero coverage. Probing it: every request

@@ -207,3 +207,71 @@ def test_the_narrator_is_told_not_to_invent():
     describe(_report(), _Client())
     assert "Do not speculate" in seen["prompt"]
     assert "too thin to tell" in seen["prompt"]
+
+
+# --- what is not there yet ----------------------------------------------------
+
+
+def test_a_resource_missing_what_its_siblings_offer(tmp_path):
+    endpoints = [Endpoint(v, "/x", "api/v1/things", a) for v, a in
+                 [("GET", "index"), ("POST", "create"), ("PATCH", "update"), ("DELETE", "destroy")]]
+    from tactics.playbooks.report import find_missing
+
+    gaps = [g for g in find_missing(str(tmp_path), endpoints) if g.kind == "incomplete resource"]
+    assert [g.detail for g in gaps] == ["serves index, create, update, destroy but not show"]
+
+
+def test_a_single_purpose_controller_is_not_badgered_into_being_a_resource(tmp_path):
+    # Two actions is a controller doing a job, not a half-built CRUD resource.
+    from tactics.playbooks.report import find_missing
+
+    endpoints = [Endpoint("GET", "/sync", "api/v1/sync", "index"),
+                 Endpoint("POST", "/sync", "api/v1/sync", "create")]
+    assert [g for g in find_missing(str(tmp_path), endpoints)
+            if g.kind == "incomplete resource"] == []
+
+
+def test_a_column_stored_and_never_returned_is_an_unfinished_feature(tmp_path):
+    # The real find on a live app: three streak columns, a service that
+    # maintains them and a job that runs it — and no serializer returning any
+    # of it, so no client could ever see the feature.
+    from tactics.playbooks.report import find_missing
+
+    root = _tree(tmp_path, {
+        "db/schema.rb": (
+            'create_table "users", force: :cascade do |t|\n'
+            '  t.string "email"\n  t.integer "current_streak"\n'
+            '  t.datetime "created_at", null: false\n  t.bigint "list_id"\n'
+            "end\n"),
+        "app/serializers/user_serializer.rb": "class UserSerializer\n  def as_json\n"
+                                              "    { email: user.email }\n  end\nend\n",
+    })
+    gaps = [g for g in find_missing(root, []) if g.kind == "stored but never returned"]
+    assert len(gaps) == 1
+    assert "current_streak" in gaps[0].detail
+    assert "email" not in gaps[0].detail          # it is returned
+    assert "created_at" not in gaps[0].detail     # plumbing
+    assert "list_id" not in gaps[0].detail        # plumbing
+
+
+def test_the_frameworks_own_columns_are_not_unfinished_features(tmp_path):
+    # Devise's schema buried the one column that mattered under six of its own.
+    from tactics.playbooks.report import find_missing
+
+    root = _tree(tmp_path, {
+        "db/schema.rb": (
+            'create_table "users", force: :cascade do |t|\n'
+            '  t.integer "failed_attempts"\n  t.datetime "confirmed_at"\n'
+            '  t.string "reset_password_token"\n  t.integer "sign_in_count"\n'
+            "end\n"),
+        "app/serializers/user_serializer.rb": "class UserSerializer; end\n",
+    })
+    assert [g for g in find_missing(root, []) if g.kind == "stored but never returned"] == []
+
+
+def test_the_report_separates_missing_from_removable():
+    text = render(Report(root="/r", kind="rails",
+                         missing=[Gap("incomplete resource", "no destroy", "things")]))
+    assert "## What is not there yet" in text
+    assert "the repository contradicting itself" in text
+    assert "no destroy" in text
