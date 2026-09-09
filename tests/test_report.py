@@ -275,3 +275,72 @@ def test_the_report_separates_missing_from_removable():
     assert "## What is not there yet" in text
     assert "the repository contradicting itself" in text
     assert "no destroy" in text
+
+
+# --- from a finding to a job of work ------------------------------------------
+
+
+def test_a_judgement_does_not_become_a_task():
+    # "This model has no policy" is a design opinion with no after-state. Putting
+    # it on the board would score whatever the agent claimed.
+    from tactics.playbooks.report import checkable
+
+    assert checkable(Gap("model without policy", "task has no policy", "app/models/task.rb")) is None
+    assert checkable(Gap("authorization opt-out", "skips verify_authorized", "c.rb")) is None
+
+
+def test_a_stored_column_becomes_a_measured_job(tmp_path):
+    from tactics.playbooks.report import checkable
+
+    job = checkable(Gap("stored but never returned",
+                        "user: current_streak, longest_streak are in the table and in no serializer",
+                        "app/serializers/user_serializer.rb"))
+    assert job is not None
+    assert job.target == 2 and job.higher_is_better
+
+    root = _tree(tmp_path, {"app/serializers/user_serializer.rb":
+                            "class UserSerializer; def as_json; { email: u.email }; end; end\n"})
+    assert not job.ok(root)[0]
+
+    after = _tree(tmp_path / "after", {"app/serializers/user_serializer.rb":
+                                       "class UserSerializer; def as_json;"
+                                       " { current_streak: u.current_streak,"
+                                       " longest_streak: u.longest_streak }; end; end\n"})
+    assert job.ok(after)[0]
+
+
+def test_a_comment_does_not_satisfy_the_gauge(tmp_path):
+    # A gauge a comment can satisfy is a gauge, not a measurement.
+    from tactics.playbooks.report import checkable
+
+    job = checkable(Gap("stored but never returned",
+                        "user: current_streak is in the table and in no serializer",
+                        "app/serializers/user_serializer.rb"))
+    root = _tree(tmp_path, {"app/serializers/user_serializer.rb":
+                            "class UserSerializer\n  # TODO: expose current_streak\nend\n"})
+    assert not job.ok(root)[0]
+
+
+def test_an_untested_endpoint_becomes_a_job_measured_in_specs(tmp_path):
+    from tactics.playbooks.report import checkable
+
+    job = checkable(Gap("untested endpoint",
+                        "POST /api/v1/tasks/batch is served but no spec mentions its path",
+                        "api/v1/tasks"))
+    assert job is not None
+    root = _tree(tmp_path, {"spec/requests/a_spec.rb": "nothing here"})
+    assert not job.ok(root)[0]
+    covered = _tree(tmp_path / "b", {"spec/requests/a_spec.rb":
+                                     'post "/api/v1/tasks/batch", params: {}'})
+    assert job.ok(covered)[0]
+
+
+def test_only_scoreable_findings_reach_the_work_list():
+    from tactics.playbooks.report import work
+
+    report = Report(root="/r", kind="rails",
+                    missing=[Gap("stored but never returned",
+                                 "user: streak is in the table and in no serializer",
+                                 "app/serializers/user_serializer.rb")],
+                    gaps=[Gap("model without policy", "no policy", "app/models/x.rb")])
+    assert [j.kind for j in work(report)] == ["expose stored data"]

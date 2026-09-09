@@ -513,6 +513,7 @@ class AgentWorkspace(Target):
         model: str | None = None,
         isolate: bool = False,
         patch_dir: str | None = None,
+        gauge: Callable[[str], tuple[bool, str]] | None = None,
     ) -> None:
         self.path = path
         self.check = list(check) if check else ["python3", "-m", "pytest", "-q"]
@@ -522,6 +523,11 @@ class AgentWorkspace(Target):
         # copy of an ant's work lives in memory until the run returns, so a run
         # that is killed, crashes, or dies on its budget takes the work with it.
         self.patch_dir = patch_dir
+        # A second half of the reward, measured rather than commanded: "the
+        # column now appears in the serializer", "this file is under 400 lines".
+        # It is *ours*, not the agent's — which is the whole point for feature
+        # work, where the agent otherwise writes the test that grades it.
+        self.gauge = gauge
         self._runner = runner or _sdk_runner
         self._custom_shell = shell is not None
         self._shell = shell or self._subprocess
@@ -588,6 +594,7 @@ class AgentWorkspace(Target):
             # bound to its owner's path, so the child must build its own.
             shell=self._shell if self._custom_shell else None,
             model=self.model,
+            gauge=self.gauge,
         )
         child.root = self
         return child
@@ -873,9 +880,20 @@ class AgentWorkspace(Target):
         return out if code == 0 else ""
 
     def verify(self) -> tuple[bool, str]:
-        """Run the check command. This — not the agent's summary — is the reward."""
+        """Run the check command, and the gauge if there is one. This is the reward.
+
+        Both must pass. The command says the behaviour still holds; the gauge
+        says the thing that was asked for actually happened. Either alone is
+        gameable — a suite that stays green proves nothing was broken, and a
+        metric that moves proves nothing was preserved.
+        """
         code, out = self.run(self.check)
-        return code == 0, out
+        if code != 0:
+            return False, out
+        if self.gauge is None:
+            return True, out
+        met, detail = self.gauge(self.path)
+        return met, f"{out}\ncheck passed; {detail}"
 
     # --- the agent seam ------------------------------------------------------
 

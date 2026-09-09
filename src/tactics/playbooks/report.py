@@ -526,6 +526,113 @@ def render(report: Report, *, limit: int = 0) -> str:
     return "\n".join(out)
 
 
+# --- from a finding to a job of work ------------------------------------------
+#
+# A report nobody can act on is a document. These turn a finding into a
+# `Candidate` — the same measure/target contract the survey uses — so the same
+# machinery that lands a refactor lands a feature. What matters is *who writes
+# the acceptance check*: here the framework does, from the finding, before the
+# agent starts. That is the answer to the self-grading problem. An agent asked
+# to expose a column cannot satisfy "the column is in the serializer" by writing
+# a test that says so.
+
+
+def _serializer_mentions(root: str, serializer: str, column: str) -> float:
+    """The column used as an output key, not merely named.
+
+    `current_streak: user.current_streak` counts; `# TODO expose current_streak`
+    does not. A gauge a comment can satisfy is a gauge, not a measurement.
+    """
+    text = _read(root, serializer)
+    key = rf'(^|[^\w:]){re.escape(column)}\s*:|["\':]{re.escape(column)}["\']'
+    return float(len(re.findall(key, text, re.MULTILINE)))
+
+
+def _route_serves(root: str, controller: str, action: str) -> float:
+    return float(any(e.controller == controller and e.action == action
+                     for e in rails_routes(root)))
+
+
+def _specs_mention(root: str, path_pattern: str) -> float:
+    pattern = re.compile(path_pattern)
+    return float(sum(1 for text in _spec_index(root).values() if pattern.search(text)))
+
+
+def checkable(gap: Gap) -> Any | None:
+    """A finding as a `Candidate`, or None when nothing mechanical decides it.
+
+    None is a real answer and the common one. "This model has no policy" is a
+    judgement about design; "this column is returned by no serializer" is a fact
+    with an obvious after-state. Only the second becomes work the colony can be
+    scored on, and pretending otherwise would put an unfalsifiable task on the
+    board where it would score whatever the agent claimed.
+    """
+    from .survey import Candidate
+
+    if gap.kind == "stored but never returned":
+        model, _, rest = gap.detail.partition(":")
+        columns = [c.strip() for c in re.split(r",|\bis\b|\bare\b", rest)
+                   if c.strip() and re.fullmatch(r"[a-z_]+", c.strip())]
+        if not columns:
+            return None
+        serializer = gap.where
+        return Candidate(
+            kind="expose stored data",
+            description=(f"{model} stores {', '.join(columns)} and no serializer returns "
+                         f"{'it' if len(columns) == 1 else 'them'}. Expose "
+                         f"{'it' if len(columns) == 1 else 'them'} through "
+                         f"{os.path.basename(serializer)} and add a request spec proving the "
+                         "API now returns the value. Do not change what is already returned."),
+            metric=f"columns of {model} exposed by its serializer",
+            before=0.0,
+            target=float(len(columns)),
+            measure=lambda tree, s=serializer, cs=columns: float(
+                sum(1 for c in cs if _serializer_mentions(tree, s, c) > 0)),
+            paths=[serializer],
+            higher_is_better=True,
+        )
+
+    if gap.kind == "incomplete resource":
+        action = gap.detail.rsplit(" not ", 1)[-1].strip()
+        controller = gap.where
+        return Candidate(
+            kind="complete the resource",
+            description=(f"{controller} serves the rest of the standard actions but not "
+                         f"`{action}`. Add it — route, controller action, policy and a "
+                         "request spec — consistent with how its siblings do it."),
+            metric=f"{controller}#{action} is routed",
+            before=0.0,
+            target=1.0,
+            measure=lambda tree, c=controller, a=action: _route_serves(tree, c, a),
+            paths=[controller],
+            higher_is_better=True,
+        )
+
+    if gap.kind == "untested endpoint":
+        path = gap.detail.split(" ", 2)[1]
+        pattern = "".join(r'[^/"\s]+' if part.startswith(":") else re.escape(part)
+                          for part in re.split(r"(:[a-z_]+)", path))
+        return Candidate(
+            kind="cover the endpoint",
+            description=(f"`{path}` is served and no spec exercises it. Add request specs "
+                         "covering its success path and its refusals."),
+            metric=f"specs exercising {path}",
+            before=0.0,
+            target=1.0,
+            measure=lambda tree, p=pattern: _specs_mention(tree, p),
+            paths=[gap.where],
+            higher_is_better=True,
+        )
+
+    return None                     # a judgement, not a job
+
+
+def work(report: Report) -> list[Any]:
+    """Everything in this report that can be scored, biggest first."""
+    jobs = [c for c in (checkable(g) for g in report.missing + report.all_gaps) if c]
+    return jobs + list(report.removable)
+
+
 # --- the optional narration ---------------------------------------------------
 
 _DESCRIBE = (

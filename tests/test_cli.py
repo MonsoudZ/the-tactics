@@ -783,3 +783,54 @@ def test_without_the_sdk_it_says_what_to_install(monkeypatch):
     client, why = _scribe_client()
     assert client is None
     assert "tactics[agent-sdk]" in why
+
+
+# --- the report drives the work -----------------------------------------------
+
+
+def test_a_task_is_not_required_when_you_ask_for_a_report(tmp_path):
+    args = build_parser().parse_args([str(tmp_path), "--report"])
+    assert args.task is None and args.report
+
+
+def test_without_a_task_or_a_report_it_refuses(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    assert main([repo], runner=_runner()) == 2
+    assert "a task is required" in capsys.readouterr().err
+
+
+def test_asking_for_an_item_the_report_does_not_have_is_refused(tmp_path, capsys):
+    repo = _repo(tmp_path)                      # a bare git repo: no findings
+    assert main([repo, "--fix", "99"], runner=_runner()) == 2
+    assert "out of range" in capsys.readouterr().err
+
+
+def test_the_gauge_is_half_the_reward(tmp_path):
+    # Both must hold: a green suite proves nothing was added, and a moved
+    # metric proves nothing was preserved.
+    from tactics.playbooks.agent_sdk import AgentWorkspace
+
+    repo = _repo(tmp_path)
+    ws = AgentWorkspace(repo, check=["true"], gauge=lambda tree: (False, "not yet"))
+    passed, detail = ws.verify()
+    assert not passed and "not yet" in detail
+
+    ws.gauge = lambda tree: (True, "done")
+    assert ws.verify()[0]
+
+    failing = AgentWorkspace(repo, check=["false"], gauge=lambda tree: (True, "done"))
+    assert not failing.verify()[0]              # the command still rules
+
+
+def test_each_ant_measures_the_gauge_in_its_own_tree(tmp_path):
+    from tactics.playbooks.agent_sdk import AgentWorkspace
+
+    seen = []
+    ws = AgentWorkspace(_repo(tmp_path), check=["true"], isolate=True,
+                        gauge=lambda tree: (seen.append(tree) or True, "ok"))
+    try:
+        session = ws.session(None)
+        session.verify()
+        assert seen == [session.path] and session.path != ws.path
+    finally:
+        ws.cleanup()

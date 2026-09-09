@@ -176,7 +176,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("repo", help="path to the git repository to work on")
-    p.add_argument("task", help="what you want done, in a sentence")
+    p.add_argument("task", nargs="?", default=None,
+                   help="what you want done, in a sentence (omit with --report or --fix)")
     p.add_argument("--check", default="pytest -q",
                    help="the command that decides success. This *is* the reward — a wrong "
                         "one measures the wrong thing (default: %(default)s)")
@@ -208,6 +209,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "you name here is never pruned")
     p.add_argument("--keep-runs", type=int, default=20, metavar="N",
                    help="how many runs of patch archive to keep (default: 20)")
+    p.add_argument("--report", action="store_true",
+                   help="read the repo and print what it does, what is missing, "
+                        "and what could go — then stop")
+    p.add_argument("--fix", type=int, default=None, metavar="N",
+                   help="do item N from the report's actionable list, checked against "
+                        "the report's own measurement rather than the agent's word")
     return p
 
 
@@ -262,6 +269,41 @@ def _diagnose(errors: list[str], args) -> str:  # noqa: ANN001
         limit = f" (currently {args.max_turns})" if args.max_turns else ""
         return f"raise --max-turns{limit}, or give the agents a narrower task"
     return ""
+
+
+def _from_report(repo: str, args) -> tuple[int | None, Any]:  # noqa: ANN001
+    """Print the report, or pick the job the user asked for out of it.
+
+    Returns (exit code, job). An exit code means stop; a job means carry on and
+    let the colony work it with the report's own measurement as half the reward.
+    """
+    from .playbooks.report import inventory, render, work
+
+    print(f"reading {repo} …", file=sys.stderr)
+    report = inventory(repo)
+    jobs = work(report)
+
+    if args.report:
+        print(render(report))
+        print("\n## What can be done about it\n")
+        if not jobs:
+            print("Nothing here has a mechanical definition of done.")
+        else:
+            print("Each of these is checkable, so `--fix N` will do it and measure "
+                  "the result rather than take the agent's word.\n")
+            for i, job in enumerate(jobs):
+                print(f"{i:>3}. [{job.kind}] {job.metric} — {job.before:g} → {job.target:g}")
+        return 0, None
+
+    if not 0 <= args.fix < len(jobs):
+        print(f"tactics: --fix {args.fix} is out of range; the report has "
+              f"{len(jobs)} actionable item(s). Run --report to see them.", file=sys.stderr)
+        return 2, None
+
+    job = jobs[args.fix]
+    args.task = job.description
+    print(f"from the report: [{job.kind}] {job.metric}  {job.before:g} → {job.target:g}\n")
+    return None, job
 
 
 def _catch_terminate():
@@ -338,6 +380,16 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:  # noqa: ANN001
               "needs somewhere to put its patches", file=sys.stderr)
         return 2
 
+    if args.report or args.fix is not None:
+        code, job = _from_report(repo, args)
+        if code is not None:
+            return code
+    elif not args.task:
+        print("tactics: a task is required (or use --report / --fix N)", file=sys.stderr)
+        return 2
+    else:
+        job = None
+
     check = shlex.split(args.check)
     if args.agents > 1 and args.dry_run:
         print("tactics: note — a dry run writes nothing, so parallel agents only "
@@ -352,7 +404,8 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:  # noqa: ANN001
               else _prune_patch_archives(os.path.dirname(patch_dir), args.keep_runs))
 
     workspace = AgentWorkspace(repo, check=check, isolate=True, runner=runner,
-                               model=args.model, patch_dir=patch_dir)
+                               model=args.model, patch_dir=patch_dir,
+                               gauge=(lambda tree, j=job: j.ok(tree)) if job else None)
     reaped = workspace.reap_abandoned_worktrees()
     if not args.no_persist:
         _prepare_tactics_dir(repo)

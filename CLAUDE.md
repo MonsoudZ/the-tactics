@@ -625,6 +625,22 @@ streak columns, a 120-line StreakService and a job enqueued on every task
 completion, and not one mention of "streak" in any serializer or controller. No
 client could ever see it.
 
+**The loop closes here** (`--report`, `--fix N`). `checkable()` turns a finding
+into the same `Candidate` contract the survey uses, so the machinery that lands
+a refactor lands a feature — and roughly half of any report returns `None`
+instead, which is the right answer: "this model has no policy" is a design
+opinion with no after-state, and putting it on the board would score whatever
+the agent claimed. The part that matters is **who writes the acceptance check**.
+Here the framework does, from the finding, before the agent starts, and
+`AgentWorkspace(gauge=...)` makes it half the reward: the command says the
+behaviour still holds, the gauge says the thing asked for actually happened.
+Either alone is gameable — a green suite proves nothing was added, a moved
+metric proves nothing was preserved. That is the answer to the self-grading
+problem `proves_itself` only half solved. The gauge itself needed the same
+scrutiny: as first written, `# TODO: expose current_streak` satisfied "the
+column appears in the serializer", so it now requires the column as an emitted
+key. A gauge a comment can satisfy is a gauge, not a measurement.
+
 **It found a real production bug on its first honest run.** The gap list said
 `POST /api/v1/tasks/batch` was served with no spec mentioning it — the only
 mutation endpoint in the app with zero coverage. Probing it: every request
