@@ -538,6 +538,42 @@ tactics <repo> "<task>" --check "..."  # the front door: point the brain at any 
   HEAD that had moved two commits since: the first agent-authored change in
   this repository, and the archive doing exactly what it exists for.
 
+### Finding the work (v0.8) — `playbooks/survey.py`
+
+Everything else here waits to be told what to do. This finds it, and it can
+because **cleanup is more measurable than feature work, not less.** Feature work
+self-grades: the agent writes the test that judges it. A refactor cannot — the
+tests already exist, so the reward is *a number moving while the suite you
+already had stays green*, with nothing self-reported in it. Every `Candidate`
+therefore carries a `measure(tree)` and a `target`, re-measured in the ant's own
+worktree exactly as the check command is. "Make it cleaner" is inexpressible
+here, which is the point: a proposal that cannot fail cannot be scored, cannot
+be rejected, and teaches the policy nothing.
+
+Three finders run by default because they read the same in every language: a
+long file is long (`oversized`, target as a *ratio* — "under 400" means
+different things at 700 and 3000 lines), a repeated block is repeated
+(`duplication`, exact-match sliding windows, three copies minimum because two
+are often coincidence), a TODO is a TODO (`unfinished`).
+
+**Every refinement in it came from being wrong on a real repo, and the failure
+modes are the lesson.** Surveying this repo, `unfinished` matched its own regex
+and its own docstring prose, and counted `raise NotImplementedError` — which is
+just how Python spells an abstract method. Markers now have to sit in a comment
+and that pattern is gone. Then surveying a real Rails API, `unreferenced`
+returned **188 candidates: every controller, job and serializer in the app**,
+because `resources :friends` never spells `FriendsController`. Acting on it
+would have deleted a production API. So it is out of the default set entirely —
+`survey(kinds=["unreferenced"])` asks for it — and it skips framework autoload
+directories and dispatched class names. Its accuracy depends on whether a
+codebase wires itself by name or by convention, which this module cannot detect
+for you. That same Rails survey then offered `db/schema.rb` as its largest file:
+generated, and rewritten by the next migration, so a file whose own header says
+a tool wrote it is not work for a person.
+
+The pattern worth keeping: a finder that cries wolf gets ignored, so narrow
+beats clever, and a heuristic must be *named* as one where it can be wrong.
+
 - **The single `Agent` loop isolates tactic errors but not `observe()`/goal-predicate
   errors.** The `Colony` (the production path) isolates everything. Keep `Target.observe`
   and `Goal.is_satisfied` total/non-throwing.
