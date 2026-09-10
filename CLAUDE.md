@@ -632,6 +632,35 @@ different things at 700 and 3000 lines), a repeated block is repeated
 (`duplication`, exact-match sliding windows, three copies minimum because two
 are often coincidence), a TODO is a TODO (`unfinished`).
 
+Three more measure the unit rather than the file — `long function`, `deep
+nesting`, `long signature` — and they are the shape that scores most honestly of
+anything here: a number comes down while the suite you already had stays green,
+so nothing in the reward is self-reported. Two rules make them hard to game.
+Each is measured **per file, on the worst case in it**, never on a named
+function: name one and you can rename it out of view or delete it to read zero,
+while "the longest function in this file" only improves by the file getting
+easier to read. And they use **a parser where one exists and stay silent
+otherwise** — Python through `ast`, Ruby by `def` and indentation for *length
+only*, nothing else attempted. That is not fastidiousness; the first version was
+regex-and-indentation throughout and produced two false positives on this
+repository's own code within a minute: `Callable[[str, int], None]` read as
+three parameters (a ten-argument function reported as twenty), and a wrapped
+argument list read as 56 levels of nesting. Deep-nesting findings fell 25 → 1
+when the parser replaced the guess.
+
+`long signature` then needed a second narrowing, from the same source. It
+counted every parameter and so offered `Colony.__init__` — three positional and
+eleven keyword-only options with defaults — as this repository's top piece of
+work. `Colony(target, tactics, planner, max_workers=1)` is not a call site
+anyone has mis-typed, and the refactor would have made the framework worse. What
+a caller has to hold is what they **must** supply: a named option with a default
+costs them nothing, `*args`/`**kwargs` are optional by definition, and a
+keyword-only argument with no default still counts because it can be named but
+not skipped. All three framework findings vanished and none of the real ones
+did. Migrations are skipped for the same reason `db/schema.rb` is: a long
+`change` method is normal there and refactoring one is work nobody does — three
+of the Rails survey's top five findings were migrations.
+
 **Every refinement in it came from being wrong on a real repo, and the failure
 modes are the lesson.** Surveying this repo, `unfinished` matched its own regex
 and its own docstring prose, and counted `raise NotImplementedError` — which is

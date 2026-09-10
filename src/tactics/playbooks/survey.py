@@ -45,7 +45,12 @@ CODE_SUFFIXES = (".py", ".rb", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".jav
 
 # Directories that are never the author's own code.
 SKIP_DIRS = {".git", "node_modules", "vendor", "tmp", "log", "build", "dist", "coverage",
-             "__pycache__", ".venv", "venv", ".bundle", "storage", ".tactics", "public"}
+             "__pycache__", ".venv", "venv", ".bundle", "storage", ".tactics", "public",
+             # Migrations are write-once and already run in production. A long
+             # `change` method is normal there and refactoring one is work
+             # nobody does — the Rails survey offered three of them as its top
+             # findings. Django and Rails both use these names.
+             "migrate", "migrations"}
 
 # A line that is only punctuation or a keyword carries no duplication signal.
 _TRIVIAL = re.compile(r"^[\s\}\)\]\{\(\[;,]*$|^\s*(end|else|fi|done|\}\selse\s\{)\s*$")
@@ -303,9 +308,205 @@ def find_unreferenced(tree: str, *, ignore: tuple[str, ...] = ("_", "test", "spe
     return out
 
 
-#: What a plain ``survey()`` runs. These three read the same on every language:
-#: a long file is long, a repeated block is repeated, a TODO is a TODO.
+# --- units that are hard to hold in your head ---------------------------------
+#
+# The classic refactor shape, and the one that scores most honestly: a number
+# comes down while the tests you already had stay green, so nothing in the
+# reward is self-reported. Three measurements, all objective, all with an
+# obvious after-state.
+#
+# Every one of them is measured **per file, on the worst case in it**, never on
+# a named function. Naming one invites the two ways this gets gamed: rename it
+# and the metric cannot find it, delete it and the metric reads zero. "The
+# longest function in this file" survives both — it can only improve by the
+# file actually getting easier to read.
+
+#: Where a function begins, for languages with no parser here. Ruby only: its
+#: `def` plus indentation is a strong enough convention to measure *length*.
+#: Nesting and argument counts are not attempted from text — the first version
+#: tried and reported a wrapped call continuation as 56 columns of nesting,
+#: which is line-wrapping, not depth.
+_FUNCTION = {".rb": re.compile(r"^(?P<indent>\s*)def\s+\w+")}
+
+#: Block statements that genuinely nest. Used against Python's own parser, so
+#: this is exact rather than a guess.
+_NESTS = ("If", "For", "AsyncFor", "While", "With", "AsyncWith", "Try", "Match",
+          "ExceptHandler")
+
+
+def _required(args) -> int:
+    """How many arguments a caller *must* supply, in order.
+
+    Not how many the signature has. `Colony.__init__` declares fourteen — three
+    positional and eleven keyword-only options with defaults — and
+    `Colony(target, tactics, planner, max_workers=1)` is not a call site anyone
+    struggles with. Counting all fourteen offered this framework's own
+    configuration constructor as work, and the refactor would have made it
+    worse. A named option with a default costs the caller nothing; what has to
+    be held in your head is the run of positionals you cannot skip, cannot name,
+    and must get the order of. `*args`/`**kwargs` are optional by definition.
+    """
+    positional = args.posonlyargs + args.args
+    supplied = [a for a in positional if a.arg not in ("self", "cls")]
+    without_default = supplied[:len(supplied) - len(args.defaults)] if args.defaults else supplied
+    mandatory_keywords = sum(1 for d in args.kw_defaults if d is None)
+    return len(without_default) + mandatory_keywords
+
+
+def _python_units(text: str) -> list[tuple[str, int, int, int]]:
+    """(name, length, nesting depth, argument count) for each Python function.
+
+    Parsed, not pattern-matched. Python ships a parser and using anything else
+    here would be choosing to be wrong: an annotation like
+    `Callable[[str, int], None]` reads as three parameters to a comma split, and
+    a wrapped argument list reads as deep nesting to an indentation count. Both
+    were live false positives before this was rewritten.
+    """
+    import ast
+
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []       # not our file to judge
+
+    def depth(node, level=0):
+        deepest = level
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue        # a nested def starts its own reckoning
+            step = 1 if type(child).__name__ in _NESTS else 0
+            deepest = max(deepest, depth(child, level + step))
+        return deepest
+
+    out = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        length = (node.end_lineno or node.lineno) - node.lineno + 1
+        out.append((node.name, length, depth(node), _required(node.args)))
+    return out
+
+
+def _ruby_lengths(text: str) -> list[int]:
+    """Function lengths in Ruby, by `def` and indentation. Length only."""
+    lines = text.splitlines()
+    out = []
+    for i, line in enumerate(lines):
+        match = _FUNCTION[".rb"].match(line)
+        if not match:
+            continue
+        base = len(match.group("indent"))
+        body = 0
+        for follower in lines[i + 1:]:
+            if follower.strip() and len(follower) - len(follower.lstrip()) <= base:
+                break
+            body += 1
+        out.append(body + 1)
+    return out
+
+
+def _longest_function(tree: str, path: str) -> float:
+    if path.endswith(".py"):
+        return float(max((length for _n, length, _d, _a in _python_units(_read(tree, path))),
+                         default=0))
+    return float(max(_ruby_lengths(_read(tree, path)), default=0))
+
+
+def find_long_functions(tree: str, *, limit: int = 60, target_ratio: float = 0.6) -> list[Candidate]:
+    """Files containing a function too long to read in one sitting.
+
+    Measured on the *longest* function in the file, never on a named one. Naming
+    invites the two ways this gets gamed: rename it and the metric cannot find
+    it, delete it and the metric reads zero. The file's worst case can only
+    improve by the file genuinely getting easier to read.
+    """
+    out = []
+    for path in code_files(tree, suffixes=(".py", ".rb")):
+        longest = _longest_function(tree, path)
+        if longest < limit:
+            continue
+        out.append(Candidate(
+            kind="long function",
+            description=(f"the longest function in {path} runs {longest:g} lines. Break it "
+                         f"into named pieces so none exceeds "
+                         f"{round(longest * target_ratio)}, without changing behaviour — "
+                         "the tests you already have are the proof."),
+            metric=f"longest function in {path}",
+            before=longest,
+            target=float(round(longest * target_ratio)),
+            measure=lambda t, p=path: _longest_function(t, p),
+            paths=[path],
+        ))
+    return sorted(out, key=lambda c: -c.before)
+
+
+def find_deep_nesting(tree: str, *, limit: int = 5) -> list[Candidate]:
+    """Python files with a function nested deeper than anyone tracks comfortably.
+
+    Depth in *block levels*, from Python's own parser — an `if` inside a `for`
+    inside a `with` is three. Python only: nothing here can parse Ruby, and
+    counting indentation instead measured line-wrapping.
+    """
+    out = []
+    for path in code_files(tree, suffixes=(".py",)):
+        units = _python_units(_read(tree, path))
+        deepest = max((d for _n, _l, d, _a in units), default=0)
+        if deepest < limit:
+            continue
+        out.append(Candidate(
+            kind="deep nesting",
+            description=(f"a function in {path} nests {deepest} block levels deep. Flatten "
+                         "it — early returns, guard clauses, an extracted predicate — "
+                         "without changing behaviour."),
+            metric=f"deepest nesting in {path}",
+            before=float(deepest),
+            target=float(limit - 1),
+            measure=lambda t, p=path: float(max(
+                (d for _n, _l, d, _a in _python_units(_read(t, p))), default=0)),
+            paths=[path],
+        ))
+    return sorted(out, key=lambda c: -c.before)
+
+
+def find_long_signatures(tree: str, *, limit: int = 6) -> list[Candidate]:
+    """Python functions demanding more *required* arguments than a caller can hold.
+
+    Two narrowings, both from being wrong on this repository. From the parser,
+    so `Callable[[str, int], None]` is one parameter rather than the three a
+    comma split reported. And only what the caller must supply, in order — see
+    :func:`_required`, which is where a fourteen-argument finding turned out to
+    be a keyword-only constructor nobody has ever mis-called.
+    """
+    out = []
+    for path in code_files(tree, suffixes=(".py",)):
+        widest = max((a for _n, _l, _d, a in _python_units(_read(tree, path))), default=0)
+        if widest <= limit:
+            continue
+        out.append(Candidate(
+            kind="long signature",
+            description=(f"a function in {path} requires {widest} arguments before a caller "
+                         f"can name anything. Group the related ones into an object, give "
+                         f"the incidental ones defaults, or split the function, so none "
+                         f"requires more than {limit}."),
+            metric=f"most required arguments in {path}",
+            before=float(widest),
+            target=float(limit),
+            measure=lambda t, p=path: float(max(
+                (a for _n, _l, _d, a in _python_units(_read(t, p))), default=0)),
+            paths=[path],
+        ))
+    return sorted(out, key=lambda c: -c.before)
+
+
+#: What a plain ``survey()`` runs. The last three read the same in every
+#: language — a long file is long, a repeated block is repeated, a TODO is a
+#: TODO — and the first three need a parser, so they measure only what they can
+#: measure exactly and stay silent elsewhere. A finder that guesses on a
+#: language it cannot read is worse than one that skips it.
 FINDERS: dict[str, Callable[..., list[Candidate]]] = {
+    "long function": find_long_functions,
+    "deep nesting": find_deep_nesting,
+    "long signature": find_long_signatures,
     "oversized": find_oversized,
     "duplication": find_duplication,
     "unfinished": find_unfinished,

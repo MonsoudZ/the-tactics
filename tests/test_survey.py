@@ -13,7 +13,10 @@ import pathlib
 from tactics.playbooks.survey import (
     Candidate,
     code_files,
+    find_deep_nesting,
     find_duplication,
+    find_long_functions,
+    find_long_signatures,
     find_oversized,
     find_unfinished,
     find_unreferenced,
@@ -220,3 +223,124 @@ def test_a_generated_file_is_not_work_for_a_person(tmp_path):
     assert is_generated(tree, "db/schema.rb") and is_generated(tree, "gen.py")
     assert not is_generated(tree, "mine.py")
     assert [c.paths for c in survey(tree)] == [["mine.py"]]
+
+
+# --- units that are hard to hold in your head ---------------------------------
+
+
+def test_a_long_function_is_measured_on_the_files_worst_case(tmp_path):
+    # Never on a named function: rename it and the metric cannot find it,
+    # delete it and the metric reads zero. The file's worst case can only
+    # improve by the file genuinely getting easier to read.
+    body = "\n".join(f"    step_{i} = {i}" for i in range(80))
+    before = _tree(tmp_path / "before", {"a.py": f"def big():\n{body}\n"})
+    candidate = find_long_functions(before)[0]
+    assert candidate.before == 81
+
+    after = _tree(tmp_path / "after", {"a.py": "def big():\n    return helper()\n\n\n"
+                                              "def helper():\n    return 1\n"})
+    assert candidate.ok(after)[0]
+
+
+def test_deleting_the_function_does_not_win(tmp_path):
+    body = "\n".join(f"    step_{i} = {i}" for i in range(80))
+    before = _tree(tmp_path / "before", {"a.py": f"def big():\n{body}\n\n\ndef other():\n"
+                                                 f"{body}\n"})
+    candidate = find_long_functions(before)[0]
+    # One of the two removed; the other is still enormous, so nothing improved.
+    after = _tree(tmp_path / "after", {"a.py": f"def other():\n{body}\n"})
+    assert not candidate.ok(after)[0]
+
+
+def test_an_annotation_is_one_parameter_not_three(tmp_path):
+    # Found live: a comma split read `Callable[[str, BriefSpec, X], AgentRun]`
+    # as three parameters and reported a 10-argument function as taking 20.
+    tree = _tree(tmp_path, {"a.py": "from typing import Callable\n\n\n"
+                                    "def f(a, cb: Callable[[str, int, float], None], c, d):\n"
+                                    "    return a\n"})
+    assert find_long_signatures(tree, limit=2)[0].before == 4
+
+
+def test_an_option_with_a_default_is_not_something_a_caller_holds(tmp_path):
+    # Found live on this repository: `Colony.__init__` declares fourteen
+    # arguments — three positional and eleven keyword-only with defaults — and
+    # was offered as the top piece of work. `Colony(target, tactics, planner,
+    # max_workers=1)` is not a call site anyone has ever mis-typed, and the
+    # refactor would have made the framework worse. A finder that fires on good
+    # design gets ignored, which costs the findings that were real.
+    tree = _tree(tmp_path, {"a.py": "def f(a, b, *, c=1, d=2, e=3, f=4, g=5, h=6, i=7):\n"
+                                    "    return a\n"})
+    assert find_long_signatures(tree, limit=3) == []
+
+
+def test_a_keyword_only_argument_with_no_default_still_counts(tmp_path):
+    # It cannot be skipped, only named. Excluding it because it is keyword-only
+    # would let a genuinely demanding signature hide behind a `*`.
+    tree = _tree(tmp_path, {"a.py": "def f(a, *, b, c, d):\n    return a\n"})
+    assert find_long_signatures(tree, limit=3)[0].before == 4
+
+
+def test_star_args_are_optional_by_definition(tmp_path):
+    tree = _tree(tmp_path, {"a.py": "def f(a, b, *rest, **kw):\n    return a\n"})
+    assert find_long_signatures(tree, limit=2) == []
+
+
+def test_self_is_not_an_argument_a_caller_passes(tmp_path):
+    tree = _tree(tmp_path, {"a.py": "class T:\n    def f(self, a, b, c):\n        return a\n"})
+    assert find_long_signatures(tree, limit=2)[0].before == 3
+
+
+def test_a_wrapped_call_is_not_deep_nesting(tmp_path):
+    # Found live: an argument list aligned under an open paren was reported as
+    # 56 columns of nesting. That is line-wrapping, and the parser knows the
+    # difference where an indentation count cannot.
+    tree = _tree(tmp_path, {"a.py": "def f():\n"
+                                    "    thing = call(one,\n"
+                                    "                 two,\n"
+                                    "                 three)\n"
+                                    "    return thing\n"})
+    assert find_deep_nesting(tree, limit=2) == []
+
+
+def test_real_nesting_is_counted_in_block_levels(tmp_path):
+    tree = _tree(tmp_path, {"a.py": "def f(xs):\n"
+                                    "    for x in xs:\n"
+                                    "        if x:\n"
+                                    "            with open(x) as fh:\n"
+                                    "                return fh\n"})
+    assert find_deep_nesting(tree, limit=3)[0].before == 3
+
+
+def test_a_nested_def_starts_its_own_reckoning(tmp_path):
+    # An inner function is not "deeper" code; it is its own unit.
+    tree = _tree(tmp_path, {"a.py": "def outer():\n"
+                                    "    def inner():\n"
+                                    "        if True:\n"
+                                    "            return 1\n"
+                                    "    return inner\n"})
+    assert find_deep_nesting(tree, limit=2) == []
+
+
+def test_a_file_python_cannot_parse_is_not_ours_to_judge(tmp_path):
+    tree = _tree(tmp_path, {"broken.py": "def f(:\n  this is not python\n"})
+    assert find_deep_nesting(tree) == [] and find_long_signatures(tree) == []
+
+
+def test_ruby_gets_length_only(tmp_path):
+    # Nothing here parses Ruby, so it is measured for length and left alone for
+    # the rest rather than guessed at.
+    body = "\n".join(f"    step_{i} = {i}" for i in range(70))
+    tree = _tree(tmp_path, {"a.rb": f"def big\n{body}\nend\n"})
+    assert find_long_functions(tree)[0].before >= 70
+    assert find_deep_nesting(tree) == [] and find_long_signatures(tree) == []
+
+
+def test_migrations_are_not_work_for_a_person(tmp_path):
+    # Found live: three of the Rails survey's top five long functions were
+    # migrations — write-once, already run in production, never refactored.
+    body = "\n".join(f"    step_{i} = {i}" for i in range(80))
+    tree = _tree(tmp_path, {
+        "db/migrate/20260101_create_things.rb": f"def change\n{body}\nend\n",
+        "app/models/thing.rb": f"def process\n{body}\nend\n",
+    })
+    assert [c.paths for c in find_long_functions(tree)] == [["app/models/thing.rb"]]
