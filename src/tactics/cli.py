@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -210,6 +211,11 @@ def build_parser() -> argparse.ArgumentParser:
                         "you name here is never pruned")
     p.add_argument("--keep-runs", type=int, default=20, metavar="N",
                    help="how many runs of patch archive to keep (default: 20)")
+    p.add_argument("--db-template", default=None, metavar="NAME",
+                   help="clone this Postgres database per agent, so parallel agents do "
+                        "not share one (detected from config/database.yml when omitted)")
+    p.add_argument("--no-provision", action="store_true",
+                   help="do not give each agent its own database, even with --agents > 1")
     p.add_argument("--report", action="store_true",
                    help="read the repo and print what it does, what is missing, "
                         "and what could go — then stop")
@@ -305,6 +311,51 @@ def _from_report(repo: str, args) -> tuple[int | None, Any]:  # noqa: ANN001
     args.task = job.description
     print(f"from the report: [{job.kind}] {job.metric}  {job.before:g} → {job.target:g}\n")
     return None, job
+
+
+def _test_database(repo: str) -> str | None:
+    """The test database this Rails app uses, if it says so and it exists."""
+    text = _read(os.path.join(repo, "config", "database.yml"))
+    section = re.split(r"^test:", text, maxsplit=1, flags=re.MULTILINE)
+    if len(section) < 2:
+        return None
+    found = re.search(r"^\s+database:\s*(\S+)", section[1], re.MULTILINE)
+    if not found:
+        return None
+    name = found.group(1).strip("\"'")
+    if "<%" in name:            # ERB: the value is computed, not declared
+        return None
+    from .playbooks.resources import _psql
+
+    exists, _out = _psql("select 1 from pg_database where datname = %r" % name)
+    return name if exists == 0 else None
+
+
+def _provisioning(repo: str, args):  # noqa: ANN001
+    """Per-agent databases, when parallel agents would otherwise share one.
+
+    Only for `--agents > 1`: a single agent sharing the default database is the
+    normal way to run a suite, and cloning for it would be ceremony. Announced
+    rather than silent, because a run that quietly used a different database
+    than the one you prepared is a confusing way to fail.
+    """
+    if args.no_provision or args.agents <= 1:
+        return None
+    template = args.db_template or _test_database(repo)
+    if not template:
+        if args.agents > 1:
+            print("note: parallel agents will share whatever lives outside the worktree "
+                  "(a database, a port). Pass --db-template NAME to give each its own.",
+                  file=sys.stderr)
+        return None
+    from .playbooks.resources import postgres_available, postgres_per_ant
+
+    if not postgres_available():
+        print(f"note: {template} named but Postgres is not reachable; agents will share "
+              "whatever the check connects to", file=sys.stderr)
+        return None
+    print(f"        each agent gets its own clone of {template}")
+    return postgres_per_ant(template)
 
 
 def _settle_check(repo: str, args) -> tuple[list[str], str]:  # noqa: ANN001
@@ -451,7 +502,8 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:  # noqa: ANN001
 
     workspace = AgentWorkspace(repo, check=check, isolate=True, runner=runner,
                                model=args.model, patch_dir=patch_dir,
-                               gauge=(lambda tree, j=job: j.ok(tree)) if job else None)
+                               gauge=(lambda tree, j=job: j.ok(tree)) if job else None,
+                               provision=_provisioning(repo, args))
     reaped = workspace.reap_abandoned_worktrees()
     if not args.no_persist:
         _prepare_tactics_dir(repo)

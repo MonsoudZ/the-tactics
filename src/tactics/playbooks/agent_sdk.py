@@ -348,6 +348,26 @@ def _is_abandoned(root: str) -> bool:
 
 
 @dataclass
+class Resource:
+    """Something an ant needs its own of, and how to give it back.
+
+    A git worktree isolates the filesystem and nothing else. An application with
+    a database, a port or a cache has state *outside* the tree that parallel
+    ants share, and sharing it is the same corruption worktrees exist to
+    prevent, one layer down: two suites truncating each other's fixtures
+    mid-run produce failures belonging to no ant in particular.
+
+    ``env`` is merged into the environment of everything that session runs, so
+    the check picks it up without knowing this exists. ``release`` is called
+    when the ant is done and must be safe to call on a run that crashed.
+    """
+
+    env: dict[str, str] = field(default_factory=dict)
+    release: Callable[[], None] = lambda: None
+    describe: str = ""
+
+
+@dataclass
 class Patch:
     """One ant's work, lifted out of its worktree before the worktree is destroyed.
 
@@ -514,6 +534,7 @@ class AgentWorkspace(Target):
         isolate: bool = False,
         patch_dir: str | None = None,
         gauge: Callable[[str], tuple[bool, str]] | None = None,
+        provision: Callable[[int, str], Resource] | None = None,
     ) -> None:
         self.path = path
         self.check = list(check) if check else ["python3", "-m", "pytest", "-q"]
@@ -528,6 +549,12 @@ class AgentWorkspace(Target):
         # It is *ours*, not the agent's — which is the whole point for feature
         # work, where the agent otherwise writes the test that grades it.
         self.gauge = gauge
+        # Called once per ant with (index, worktree path). Without it, parallel
+        # ants share whatever lives outside the tree.
+        self.provision = provision
+        self.env: dict[str, str] = {}
+        self._resource: Resource | None = None
+        self._provisioned = 0
         self._runner = runner or _sdk_runner
         self._custom_shell = shell is not None
         self._shell = shell or self._subprocess
@@ -571,6 +598,13 @@ class AgentWorkspace(Target):
             return self
         child = self._add_worktree(prefix="ant")
         child.task_id = str(getattr(task, "id", "") or "")
+        if self.provision is not None:
+            with self._lock:
+                self._provisioned += 1
+                index = self._provisioned
+            resource = self.provision(index, child.path)
+            child._resource = resource
+            child.env = dict(resource.env)
         return child
 
     def _add_worktree(self, *, prefix: str = "wt") -> "AgentWorkspace":
@@ -596,6 +630,7 @@ class AgentWorkspace(Target):
             model=self.model,
             gauge=self.gauge,
         )
+        child.env = dict(self.env)
         child.root = self
         return child
 
@@ -691,6 +726,14 @@ class AgentWorkspace(Target):
         if session is self or not isinstance(session, AgentWorkspace):
             return
         patch = session.pending_patch or session.capture_patch()
+        # Give the resource back before anything else can fail. A database left
+        # behind by every run is the same slow leak worktrees were.
+        if getattr(session, "_resource", None) is not None:
+            try:
+                session._resource.release()
+            except Exception:  # noqa: BLE001 - a leaked resource is not worth losing a patch
+                pass
+            session._resource = None
         if patch:
             with self._lock:
                 self.patches.append(patch)
@@ -826,7 +869,9 @@ class AgentWorkspace(Target):
 
     def _subprocess(self, cmd: list[str]) -> tuple[int, str]:
         try:
-            p = subprocess.run(cmd, cwd=self.path, capture_output=True, text=True, timeout=1800)
+            environment = {**os.environ, **self.env} if self.env else None
+            p = subprocess.run(cmd, cwd=self.path, capture_output=True, text=True,
+                               timeout=1800, env=environment)
             return p.returncode, (p.stdout or "") + (p.stderr or "")
         except FileNotFoundError:
             return 127, f"command not found: {cmd[0]}"
