@@ -577,6 +577,39 @@ class AgentWorkspace(Target):
         # workspace points at itself. A tactic that must act on the *real* tree
         # (landing a patch) reaches it through here.
         self.root: AgentWorkspace = self
+        # Where this workspace sits inside its repository, "" at the top. In a
+        # monorepo the two are different and the difference is load-bearing:
+        # `git worktree add` has no way to check out one subdirectory, so an ant
+        # pointed at `packages/web` gets a checkout of the *whole* repo and,
+        # until this existed, worked and measured at its root. Resolved lazily
+        # because it costs a subprocess and most repositories are not monorepos.
+        self._subdir: str | None = None
+        # The directory git actually registered as a worktree. The same thing as
+        # `path` outside a monorepo, and the *parent* of it inside one — so
+        # anything handing a path to `git worktree remove` must use this. Three
+        # call sites used `path` and silently leaked a full checkout per trial
+        # the moment `path` stopped being the checkout root.
+        self.checkout_root: str = path
+
+    @property
+    def subdir(self) -> str:
+        """This workspace's path relative to its repository root, "" at the top.
+
+        `git rev-parse --show-prefix` rather than string arithmetic against
+        `--show-toplevel`: it is the question git is actually being asked, and
+        it stays right through symlinks and case-insensitive filesystems, where
+        comparing two absolute paths quietly does not.
+        """
+        if self._subdir is None:
+            code, out = self.run(["git", "rev-parse", "--show-prefix"])
+            self._subdir = out.strip().strip("/") if code == 0 else ""
+        return self._subdir
+
+    @property
+    def git_root(self) -> str:
+        """The top of the repository this workspace lives in."""
+        code, out = self.run(["git", "rev-parse", "--show-toplevel"])
+        return out.strip() if code == 0 else self.path
 
     # --- per-ant isolation ---------------------------------------------------
 
@@ -608,7 +641,21 @@ class AgentWorkspace(Target):
         return child
 
     def _add_worktree(self, *, prefix: str = "wt") -> "AgentWorkspace":
-        """A detached checkout of HEAD, as a workspace in its own right."""
+        """A detached checkout of HEAD, as a workspace in its own right.
+
+        In a monorepo the checkout is still the whole repository — git offers no
+        way to cut a worktree of one subdirectory — but the workspace handed back
+        is positioned at *this* workspace's package inside it. Without that the
+        ant works and measures at the monorepo root: the check collects every
+        other package's tests, and a task about `packages/web` is graded on a
+        tree it was never about.
+
+        The git plumbing needs no adjusting for it. `status`, `diff HEAD` and
+        `apply --3way` are all repository-wide and repository-root-relative from
+        anywhere inside a work tree, so a change reaching a sibling package —
+        exactly what a shared dependency invites — is still captured and still
+        applies. Only the working directory was ever wrong.
+        """
         with self._lock:
             if self._worktree_root is None:
                 # Outside the repo, or git would treat it as untracked content.
@@ -620,8 +667,16 @@ class AgentWorkspace(Target):
             # Fail loudly. Silently sharing the main tree is the exact corruption
             # this method exists to prevent.
             raise RuntimeError(f"could not create worktree at {path}: {out.strip()[-300:]}")
+        working = os.path.join(path, self.subdir) if self.subdir else path
+        if not os.path.isdir(working):
+            # The package exists in your checkout but not at HEAD — uncommitted,
+            # or renamed since. Loudly, for the same reason as above: the
+            # fallback is working at the monorepo root, which is the bug.
+            raise RuntimeError(
+                f"{self.subdir!r} does not exist at HEAD, so there is nothing to "
+                f"check out for it; commit it first")
         child = AgentWorkspace(
-            path,
+            working,
             check=self.check,
             runner=self._runner,
             # A custom shell is a test seam and passes through; the default one is
@@ -632,6 +687,7 @@ class AgentWorkspace(Target):
         )
         child.env = dict(self.env)
         child.root = self
+        child.checkout_root = path
         return child
 
     def proves_itself(self, patch: Patch) -> PatchTrial:
@@ -677,7 +733,7 @@ class AgentWorkspace(Target):
                        f"{', '.join(tests)} pass without the rest of the patch",
             )
         finally:
-            self.run(["git", "worktree", "remove", "--force", scratch.path])
+            self.run(["git", "worktree", "remove", "--force", scratch.checkout_root])
 
     def trial(self, patch: Patch) -> PatchTrial:
         """Apply a candidate patch to a scratch checkout of HEAD and measure it.
@@ -699,7 +755,7 @@ class AgentWorkspace(Target):
             return PatchTrial(applies=True, passes=passes,
                               detail="" if passes else output.strip()[-300:])
         finally:
-            self.run(["git", "worktree", "remove", "--force", scratch.path])
+            self.run(["git", "worktree", "remove", "--force", scratch.checkout_root])
 
     def land(self, patch: Patch) -> None:
         """Record a patch as landed and retire the alternatives.
@@ -739,7 +795,7 @@ class AgentWorkspace(Target):
                 self.patches.append(patch)
                 index = len(self.patches)
             self._save_patch(patch, index)
-        self.run(["git", "worktree", "remove", "--force", session.path])
+        self.run(["git", "worktree", "remove", "--force", session.checkout_root])
 
     def _save_patch(self, patch: Patch, index: int) -> None:
         """Write one patch to ``patch_dir``. Never costs the caller its work.
@@ -847,7 +903,12 @@ class AgentWorkspace(Target):
             return []
         paths = [line[len("worktree "):].strip()
                  for line in out.splitlines() if line.startswith("worktree ")]
-        return [p for p in paths if os.path.abspath(p) != os.path.abspath(self.path)]
+        # Against the repository top level, not `self.path`: git lists worktrees
+        # by their root, so in a monorepo pointed at `packages/web` the main
+        # tree never matched and was not excluded. Harmless today only because
+        # the reaper independently ignores anything outside a tactics root.
+        mine = os.path.abspath(self.git_root)
+        return [p for p in paths if os.path.abspath(p) != mine]
 
     def cleanup(self) -> None:
         """Remove every worktree this workspace created. Safe to call twice."""

@@ -276,7 +276,7 @@ def test_it_warns_when_a_repo_has_no_gitignore(tmp_path, capsys):
     # .pyc files in its own patch, and the patch then would not apply.
     repo = _repo(tmp_path)
     main(_argv(repo, "--dry-run"), runner=_runner())
-    assert "no .gitignore" in capsys.readouterr().err
+    assert "nothing here ignores build output" in capsys.readouterr().err
 
 
 def test_no_such_warning_when_the_repo_ignores_its_artifacts(tmp_path, capsys):
@@ -285,7 +285,25 @@ def test_no_such_warning_when_the_repo_ignores_its_artifacts(tmp_path, capsys):
     subprocess.run(["git", "-C", repo, "add", "-A"], check=True, capture_output=True)
     subprocess.run(["git", "-C", repo, "commit", "-qm", "ignore"], check=True, capture_output=True)
     main(_argv(repo, "--dry-run"), runner=_runner())
-    assert "no .gitignore" not in capsys.readouterr().err
+    assert "nothing here ignores build output" not in capsys.readouterr().err
+
+
+def test_a_monorepo_package_is_not_warned_for_its_root_gitignore(tmp_path, capsys):
+    # The rules almost always sit at the repository root, which is the one place
+    # a package-relative file check cannot see — so every package of a perfectly
+    # well-configured monorepo got warned at. Asked of git now, which consults
+    # every source of rules at once.
+    repo = _repo(tmp_path)
+    pathlib.Path(repo, ".gitignore").write_text("__pycache__/\n*.pyc\n")
+    package = pathlib.Path(repo, "packages", "web")
+    package.mkdir(parents=True)
+    pathlib.Path(package, "mod.py").write_text("x = 1\n")
+    subprocess.run(["git", "-C", repo, "add", "-A"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", repo, "commit", "-qm", "package"], check=True, capture_output=True)
+
+    assert not pathlib.Path(package, ".gitignore").exists()      # only the root has one
+    main(_argv(str(package), "--dry-run"), runner=_runner())
+    assert "nothing here ignores build output" not in capsys.readouterr().err
 
 
 # --- the archive does not grow forever ----------------------------------------

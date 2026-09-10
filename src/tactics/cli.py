@@ -72,6 +72,30 @@ def _check_repo(repo: str) -> str:
     return ""
 
 
+#: What the artifact warning is actually about. Asked of git rather than looked
+#: for on disk: a `.gitignore` beside the package is only one of the places an
+#: answer can come from, and in a monorepo it is the *least* likely one — the
+#: rules almost always sit at the repository root. Checking for the file meant
+#: every package of a perfectly well-configured monorepo was warned at.
+_ARTIFACTS = ("__pycache__/x.pyc", ".pytest_cache/x", "coverage/x", "node_modules/x",
+              "build/x", "dist/x", "tmp/x", "target/x")
+
+
+def _ignores_build_artifacts(repo: str) -> bool:
+    """Does anything ignore the sort of thing a check leaves behind?
+
+    `git check-ignore` consults every source of rules at once — the package's
+    own file, every `.gitignore` above it, `.git/info/exclude`, and the user's
+    global one — which is the question, and not one the filesystem can answer.
+    """
+    # No `-q`: it is "only valid with a single pathname" and exits 128 on more,
+    # which reads as "nothing is ignored" and warns at every repository on
+    # earth. Without it the ignored paths are printed, so the output is the
+    # answer and the exit code is not needed.
+    _code, out = _git(repo, "check-ignore", *_ARTIFACTS)
+    return bool(out.strip())
+
+
 def _warnings(repo: str, check: list[str]) -> list[str]:
     """Things that quietly measure the wrong thing. Cheap to check, costly to miss."""
     out = []
@@ -79,10 +103,10 @@ def _warnings(repo: str, check: list[str]) -> list[str]:
     if dirty:
         out.append(f"{len(dirty.splitlines())} uncommitted change(s) — worktrees are cut "
                    "from HEAD, so the agents will not see them")
-    if not os.path.exists(os.path.join(repo, ".gitignore")):
-        out.append("no .gitignore — anything the agent or your check command builds "
-                   "(__pycache__, coverage data, compiled output) lands in the patch "
-                   "alongside the real change, and can stop it applying")
+    if not _ignores_build_artifacts(repo):
+        out.append("nothing here ignores build output — anything the agent or your check "
+                   "command builds (__pycache__, coverage data, compiled output) lands in "
+                   "the patch alongside the real change, and can stop it applying")
     if os.path.isdir(os.path.join(repo, "src")) and check and "pytest" in " ".join(check):
         configured = any(
             "pythonpath" in _read(os.path.join(repo, name)).lower()

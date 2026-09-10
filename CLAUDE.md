@@ -604,6 +604,55 @@ repair. That is not hypothetical — a spec on a real app failed here only
 because this container's tzdata lacked the legacy timezone links, and agents
 handed that would have "fixed" production code to accommodate a missing symlink.
 
+### Monorepos (v1.2) — pointing it at one package
+
+`git worktree add` has no way to check out a subdirectory, so an ant pointed at
+`packages/web` gets a checkout of the **whole** repository — and until now it
+then worked and measured at its root. That is not cosmetic: on a fixture where a
+sibling package has an unrelated failing test, the ant's check goes red for
+`packages/api`, so the agent is scored 0 for code it was never asked about and a
+repair task then points it at that code.
+
+The fix is narrower than it first looks, because **git needed no help at all**.
+`status`, `diff HEAD` and `apply --3way` are all repository-wide and
+repository-root-relative from anywhere inside a work tree — verified before
+changing anything — so a change reaching a sibling package, which a shared
+dependency invites, is still captured and still applies. Only the *working
+directory* was ever wrong. `subdir` comes from `git rev-parse --show-prefix`
+rather than string arithmetic against `--show-toplevel`, since that is the
+question git is actually being asked and it stays right through symlinks and
+case-insensitive filesystems. A package that exists in your checkout but not at
+HEAD fails loudly, because the fallback is working at the root, which is the bug.
+
+**Scoping the working directory then leaked a full checkout per trial**, and the
+live run is what caught it: two `trial-` worktrees survived `--apply` on a
+monorepo where a plain repo left none. Three call sites removed a worktree by
+`session.path`/`scratch.path`, which had silently stopped being the directory
+git registered. Hence `checkout_root` alongside `path`. The lesson is about the
+test, not the code: asserting the ant's path was right and passed, while the
+thing that broke was a *second* property of the same object — so the regression
+test now runs `proves_itself` and asserts nothing is left registered, which is
+the behaviour rather than the attribute. `cleanup()` hid it by sweeping the root
+by directory listing.
+
+The `.gitignore` warning was wrong here too, and in the way that trains people
+to ignore warnings: it looked for a file beside the package, but the rules
+almost always sit at the repository root — so every package of a
+well-configured monorepo got warned at. It asks `git check-ignore` now, which
+consults the package's own file, every `.gitignore` above it, `.git/info/exclude`
+and the user's global one at once. (Note `-q` is "only valid with a single
+pathname" and exits 128 on more, which reads as *nothing is ignored* and warns
+at every repository on earth — so the paths are passed without it and the
+printed output is the answer.)
+
+`.tactics/` lands in the package, deliberately: which brief wins for *this*
+package, and what past runs on it learned, are per-package facts.
+
+**Verified live**, clean fixture, two packages where both are red: 2 agents,
+$0.13, both verified, smallest landed, `packages/web` red → green, `packages/api`
+untouched and still red, the diff scoped to one file, no worktrees left and no
+warnings raised.
+
 ### Per-ant resources (v1.1) — `playbooks/resources.py`
 
 A git worktree isolates files and nothing else, which is why every run against

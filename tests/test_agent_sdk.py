@@ -572,8 +572,11 @@ def test_the_last_result_wins_because_it_carries_the_call_total(monkeypatch):
 # mock agrees with itself; the whole claim here is that two agents editing at the
 # same time cannot see each other, and only real worktrees can show that.
 
+import os
 import pathlib
 import subprocess
+
+import pytest
 
 
 def _git_repo(tmp_path) -> str:
@@ -1622,5 +1625,156 @@ def test_a_session_with_no_pending_capture_still_captures_at_release(tmp_path):
         pathlib.Path(session.path, "by_hand.txt").write_text("hi\n")
         ws.release(session)
         assert "by_hand.txt" in ws.patches[0].text
+    finally:
+        ws.cleanup()
+
+
+# --- monorepos ----------------------------------------------------------------
+#
+# `git worktree add` has no way to check out one subdirectory, so an ant pointed
+# at a package inside a monorepo gets the whole repository. Until this was
+# fixed it then *worked and measured at the root*.
+
+
+def _monorepo(tmp_path) -> str:
+    """Two packages, one of which has a failing test. Pointed at the healthy
+    one, a root-anchored check goes red for the other package's failure."""
+    repo = pathlib.Path(tmp_path, "mono")
+    run = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, check=True)
+    for pkg in ("web", "api"):
+        pathlib.Path(repo, "packages", pkg, "tests").mkdir(parents=True)
+    pathlib.Path(repo, "README.md").write_text("monorepo\n")
+    pathlib.Path(repo, "packages/web/tests/test_web.py").write_text("def test_web():\n    assert True\n")
+    pathlib.Path(repo, "packages/api/tests/test_api.py").write_text("def test_api():\n    assert False\n")
+    run("init", "-q"); run("config", "user.email", "t@t"); run("config", "user.name", "t")
+    run("add", "-A"); run("commit", "-qm", "seed")
+    return str(repo)
+
+
+def test_an_ant_works_in_the_package_not_the_repo_root(tmp_path):
+    ws = AgentWorkspace(str(pathlib.Path(_monorepo(tmp_path), "packages/web")), isolate=True)
+    try:
+        assert ws.subdir == "packages/web"
+        session = ws.session(None)
+        assert session.path.endswith("packages/web")
+        assert sorted(os.listdir(session.path)) == ["tests"]
+    finally:
+        ws.cleanup()
+
+
+def test_the_check_measures_the_package_and_not_its_siblings(tmp_path):
+    # The damage this caused, and why it is not cosmetic: at the root the check
+    # goes red for `packages/api`'s failing test, so the ant is scored 0 for a
+    # failure in code it was never asked about — and a repair task then points
+    # it at that code.
+    web = str(pathlib.Path(_monorepo(tmp_path), "packages/web"))
+    ws = AgentWorkspace(web, isolate=True, check=["python3", "-m", "pytest", "-q"])
+    try:
+        session = ws.session(None)
+        passed, output = session.verify()
+        assert passed, output
+
+        # Same worktree, anchored at the root: this is what it used to do.
+        at_root = AgentWorkspace(session.path[: -len("/packages/web")], check=ws.check)
+        assert not at_root.verify()[0]
+    finally:
+        ws.cleanup()
+
+
+def test_a_change_reaching_a_sibling_package_is_still_captured(tmp_path):
+    # A shared dependency invites exactly this, and dropping it would produce a
+    # patch that does not work. Git's plumbing is repository-wide and
+    # root-relative from anywhere inside a work tree, so nothing had to be
+    # adjusted for it — but it is the property that makes scoping the *working
+    # directory* rather than the *diff* the right fix, so it is pinned here.
+    ws = AgentWorkspace(str(pathlib.Path(_monorepo(tmp_path), "packages/web")), isolate=True)
+    try:
+        session = ws.session(None)
+        pathlib.Path(session.path, "feature.py").write_text("VALUE = 42\n")
+        pathlib.Path(session.path, "..", "api", "shared.py").resolve().write_text("SHARED = 1\n")
+        ws.release(session)
+        assert ws.patches[0].files == ["packages/api/shared.py", "packages/web/feature.py"]
+    finally:
+        ws.cleanup()
+
+
+def test_a_patch_from_a_package_applies_back(tmp_path):
+    repo = _monorepo(tmp_path)
+    ws = AgentWorkspace(str(pathlib.Path(repo, "packages/web")), isolate=True)
+    try:
+        session = ws.session(None)
+        pathlib.Path(session.path, "feature.py").write_text("VALUE = 42\n")
+        ws.release(session)
+        applied, detail = ws.apply_patch(ws.patches[0])
+        assert applied, detail
+        assert pathlib.Path(repo, "packages/web/feature.py").exists()
+    finally:
+        ws.cleanup()
+
+
+def test_a_package_that_is_not_committed_yet_fails_loudly(tmp_path):
+    # The fallback would be working at the monorepo root, which is the bug.
+    repo = _monorepo(tmp_path)
+    fresh = pathlib.Path(repo, "packages/brand-new")
+    fresh.mkdir()
+    ws = AgentWorkspace(str(fresh), isolate=True)
+    try:
+        with pytest.raises(RuntimeError, match="does not exist at HEAD"):
+            ws.session(None)
+    finally:
+        ws.cleanup()
+
+
+def test_a_scratch_tree_is_positioned_in_the_package_too(tmp_path):
+    # `proves_itself` and `trial` cut further worktrees to re-verify a patch.
+    # At the root they would re-verify against a different tree than the run.
+    ws = AgentWorkspace(str(pathlib.Path(_monorepo(tmp_path), "packages/web")), isolate=True)
+    try:
+        scratch = ws._add_worktree(prefix="trial")
+        assert scratch.path.endswith("packages/web")
+        # And it still knows the directory git registered, which is the *parent*.
+        # Asserting only the working path is what let a real leak through: two
+        # `trial-` checkouts survived a live `--apply` run on a monorepo,
+        # because `git worktree remove <path>` was handed the package.
+        assert scratch.checkout_root == scratch.path[: -len("/packages/web")]
+    finally:
+        ws.cleanup()
+
+
+def test_re_verifying_a_patch_leaves_no_worktree_behind(tmp_path):
+    # The leak above, end to end and through the real removal path rather than
+    # through `cleanup()`, which sweeps by directory listing and so hid it.
+    repo = _monorepo(tmp_path)
+    ws = AgentWorkspace(str(pathlib.Path(repo, "packages/web")), isolate=True)
+    try:
+        session = ws.session(None)
+        pathlib.Path(session.path, "tests", "test_new.py").write_text("def test_new():\n    assert True\n")
+        ws.release(session)
+        ws.proves_itself(ws.patches[0])
+        assert ws._registered_worktrees() == []
+    finally:
+        ws.cleanup()
+
+
+def test_an_ordinary_repository_is_unaffected(tmp_path):
+    ws = AgentWorkspace(_git_repo(tmp_path), isolate=True)
+    try:
+        assert ws.subdir == ""
+        assert not ws.session(None).path.endswith("/")
+    finally:
+        ws.cleanup()
+
+
+def test_the_main_tree_is_excluded_from_the_worktree_listing(tmp_path):
+    # It is listed by its root, so comparing against `self.path` never matched
+    # in a monorepo. Harmless today only because the reaper independently
+    # ignores anything outside a tactics root — defence in depth, not decoration.
+    repo = _monorepo(tmp_path)
+    ws = AgentWorkspace(str(pathlib.Path(repo, "packages/web")), isolate=True)
+    try:
+        ws.session(None)
+        listed = ws._registered_worktrees()
+        assert os.path.abspath(repo) not in [os.path.abspath(p) for p in listed]
+        assert len(listed) == 1
     finally:
         ws.cleanup()
