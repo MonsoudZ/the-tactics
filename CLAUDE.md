@@ -565,6 +565,31 @@ real app — but the API does not default to `spec/` the way the binary does, so
 it had run **zero examples and exited 0**. Named explicitly now, it runs the
 real suite in 80s.
 
+**A dependency that is not answering is the third category**, and it is the
+tzdata failure in different clothes. A container whose Postgres is not up runs
+the suite, goes red, and looks exactly like a repository in need of repair — so
+agents get pointed at application code to fix a connection drop. Verified
+against the real Rails app with a `DATABASE_URL` naming no database: detection
+now refuses and says *"could not reach a service it depends on — that is this
+environment, not the repository"*.
+
+Two things worth keeping from it. The old rule already refused that case, **by
+accident** — `_EMPTY`'s `^0 examples, 0 failures` prefix-matched RSpec's `0
+examples, 0 failures, 21 errors occurred outside of examples` — and so reported
+"collected no tests", sending a user off to look for missing specs. Right
+refusal, wrong reason, and the reason is what gets acted on. The accident also
+did not cover the dangerous case: a suite that half-ran and *then* lost its
+database has no "0 examples" line anywhere, and sailed through as a red suite.
+That is what `_DID_NOT_LOAD` catches — the runner itself saying the failures
+happened before any of the repository's code was reached.
+
+The patterns are deliberately narrow, because a suite that *tests* error
+handling prints "Connection refused" quite legitimately, and disqualifying its
+check would be worse than the bug: each one names a database or cache driver
+failing to reach its server, never a bare network word. It is still a heuristic,
+so it only ever *refuses* a check — it never selects one, and never overturns a
+run that went green.
+
 Two escapes from real containers are built in, both found the hard way. Ruby
 gets a fallback through `ruby -e` because a gem home with no `bin/` makes
 `bundle exec rspec` exit 127 while rspec-core is plainly installed. Python

@@ -170,3 +170,83 @@ def test_the_ruby_fallback_names_the_spec_directory(tmp_path):
     root = _tree(tmp_path, {"Gemfile": "gem 'rspec'\n", "spec/x_spec.rb": ""})
     fallback = next(c for c in propose(root) if "RSpec::Core::Runner" in c.command)
     assert '["spec"]' in fallback.command
+
+
+# --- a dependency that is not answering ---------------------------------------
+#
+# The tzdata failure wearing different clothes: a check that goes red for a
+# reason having nothing to do with the repository, handed to a swarm that will
+# duly "fix" production code to accommodate it.
+
+
+#: Trimmed from a real run: focusmate-api's suite against a DATABASE_URL naming
+#: a database that does not exist.
+_NO_DATABASE = """An error occurred while loading ./spec/models/user_spec.rb.
+Failure/Error: ActiveRecord::Migration.maintain_test_schema!
+
+ActiveRecord::NoDatabaseError:
+  We could not find your database: definitely_not_a_database_here.
+# --- Caused by: ---
+# PG::ConnectionBad:
+#   connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed:
+#   FATAL:  database "definitely_not_a_database_here" does not exist
+
+0 examples, 0 failures, 21 errors occurred outside of examples
+"""
+
+
+def test_a_database_that_is_not_there_is_not_a_red_suite():
+    a = _attempt(1, _NO_DATABASE)
+    assert not a.usable
+    assert a.unavailable
+
+
+def test_the_reason_given_is_the_real_one(tmp_path):
+    # It was already refused before this existed, but by accident: `_EMPTY`'s
+    # `^0 examples, 0 failures` prefix-matched `0 examples, 0 failures, 21
+    # errors occurred outside of examples`, so the answer was "collected no
+    # tests". Right refusal, wrong reason — and the reason is what a user acts
+    # on. They would have gone looking for missing specs.
+    script = pathlib.Path(tmp_path, "fake_suite.sh")
+    script.write_text(f"#!/bin/sh\ncat <<'EOF'\n{_NO_DATABASE}EOF\nexit 1\n")
+    script.chmod(0o755)
+
+    check = Check([str(script)], "", "rspec")
+    attempt(str(tmp_path), check)
+    assert check.ran is False
+    assert "could not reach a service" in check.detail
+    assert "collected no tests" not in check.detail
+
+
+def test_a_suite_that_half_ran_and_lost_its_database_is_still_not_a_check():
+    # The case the accident did not cover, and the dangerous one: examples ran,
+    # so there is no "0 examples" line anywhere. Under the old rule this was a
+    # red suite — a repository in need of repair — and agents would have been
+    # pointed at application code to fix a connection drop.
+    output = ("40 examples, 21 failures\n"
+              "Failure/Error: PG::ConnectionBad: could not connect to server")
+    assert not _attempt(1, output).usable
+
+
+def test_a_suite_that_never_loaded_is_not_a_check_whatever_the_cause():
+    # The general form. The runner is saying the failures happened before any
+    # of the repository's code was reached.
+    assert not _attempt(1, "12 errors occurred outside of examples").usable
+    assert not _attempt(2, "ERROR collecting tests/test_x.py").usable
+
+
+def test_a_suite_testing_error_handling_is_left_alone(tmp_path):
+    # The cry-wolf guard. A repository whose specs cover a refused connection
+    # will print exactly the words a naive rule would key on, and disqualifying
+    # its check would be worse than the bug this fixes. So each pattern names a
+    # driver failing to reach its server, never a bare network phrase.
+    output = ("Errno::ECONNREFUSED: Connection refused - connect(2)\n"
+              "expected the client to retry\n"
+              "31 examples, 1 failure")
+    assert _attempt(1, output).usable
+
+
+def test_a_passing_run_is_not_second_guessed():
+    # `unavailable` only ever refuses a check; it never selects one, and it must
+    # not overturn a suite that went green.
+    assert _attempt(0, "80 examples, 0 failures").usable

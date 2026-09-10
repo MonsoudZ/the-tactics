@@ -54,6 +54,35 @@ _EMPTY = re.compile(
     re.IGNORECASE | re.MULTILINE)
 
 
+#: A dependency the agent does not control is not answering. This is the same
+#: family as the missing `tzdata-legacy` that failed a real spec here — a check
+#: that fails for a reason having nothing to do with the repository, handed to a
+#: swarm that will duly "fix" production code to accommodate it.
+#:
+#: Deliberately narrow, because a suite that *tests* error handling will print
+#: "Connection refused" quite legitimately: each pattern names a database or
+#: cache driver saying it could not reach its server, not a generic network
+#: word. It is still a heuristic and can be wrong, which is why it only ever
+#: refuses a check — it never selects one.
+_UNAVAILABLE = re.compile(
+    r"ActiveRecord::NoDatabaseError|ActiveRecord::ConnectionNotEstablished|"
+    r"PG::ConnectionBad|Mysql2::Error::ConnectionError|Redis::CannotConnectError|"
+    r"could not connect to server|connection to server on socket|"
+    r"OperationalError: could not connect|psycopg2\.OperationalError|"
+    r"Is the server running on host",
+    re.IGNORECASE)
+
+
+#: The runner itself saying the suite never loaded. Distinct from a red suite:
+#: these phrases sit where a *summary* goes, which is not somewhere a test's own
+#: output lands, and they mean the failures belong to the environment rather
+#: than the code.
+_DID_NOT_LOAD = re.compile(
+    r"errors occurred outside of examples|error(s)? during collection|"
+    r"ERROR collecting|An error occurred while loading",
+    re.IGNORECASE)
+
+
 @dataclass
 class Check:
     """One way of testing this repository, and the evidence that suggested it."""
@@ -93,6 +122,8 @@ class Attempt:
         cannot measure anything: `npm ERR! Missing script`, a Ruby `LoadError`,
         a Python `ModuleNotFoundError`. Everything else ran.
         """
+        if self.unavailable or self.did_not_load:
+            return False
         if _EMPTY.search(self.output) or (self.code == 5 and "pytest" in self.check.command):
             return False        # pytest's 5 is "collected nothing"
         if self.code == 0:
@@ -100,6 +131,29 @@ class Attempt:
         if self.code in (126, 127):
             return False
         return not _BROKEN.search(self.output)
+
+    @property
+    def unavailable(self) -> bool:
+        """A dependency the repository needs is not answering.
+
+        Checked *before* emptiness, because a down database produced
+        `0 examples, 0 failures, 21 errors occurred outside of examples` on a
+        real Rails app — which the empty-check rule caught by prefix accident
+        and then reported as "collected no tests". Right refusal, wrong reason,
+        and the wrong reason is what a user would act on.
+        """
+        return bool(_UNAVAILABLE.search(self.output))
+
+    @property
+    def did_not_load(self) -> bool:
+        """The runner says the suite never loaded, whatever the cause.
+
+        The general case of the one above: a suite that half-ran and then lost
+        its database reports failures like any red suite, and only this line
+        distinguishes "your code is broken" from "the errors happened before
+        your code was reached".
+        """
+        return bool(_DID_NOT_LOAD.search(self.output))
 
 
 # --- proposing ----------------------------------------------------------------
@@ -215,6 +269,10 @@ def attempt(root: str, check: Check, *, timeout: int = 900) -> Attempt:
     check.ran = result.usable
     check.detail = ("passed" if code == 0 else
                     "ran, and the suite is red" if result.usable else
+                    "could not reach a service it depends on — that is this "
+                    "environment, not the repository" if result.unavailable else
+                    "the suite never loaded, so the failures are not the code's"
+                    if result.did_not_load else
                     "ran, but collected no tests — nothing here to measure"
                     if _EMPTY.search(output) or code == 5 else
                     output.strip().splitlines()[-1][:160] if output.strip() else "no output")
