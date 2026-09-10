@@ -579,6 +579,41 @@ repair. That is not hypothetical — a spec on a real app failed here only
 because this container's tzdata lacked the legacy timezone links, and agents
 handed that would have "fixed" production code to accommodate a missing symlink.
 
+### Per-ant resources (v1.1) — `playbooks/resources.py`
+
+A git worktree isolates files and nothing else, which is why every run against
+a real Rails app here had been `--agents 1`: three ants running the suite
+against one Postgres truncate each other's fixtures mid-run and produce
+failures belonging to no ant in particular. That is the corruption
+`Target.session` exists to prevent, one layer down, and it made the framework's
+central mechanism — competing briefs, measured against each other —
+unavailable on exactly the repositories that matter.
+
+The mechanism is domain-free: a session may carry a `Resource` whose `env` is
+merged into everything that session runs and released when the ant is done. The
+core never learns what a database is. `postgres_per_ant` lives in a playbook
+and clones with `CREATE DATABASE … TEMPLATE`, which copies a prepared schema in
+a second rather than re-running migrations per ant per round; the CLI reads the
+template from `config/database.yml` and provisions only for `--agents > 1`.
+
+Three decisions worth keeping. **A failed clone leaves the ant with no override
+rather than a broken one** — pointing at a database that does not exist fails
+every check for a reason that has nothing to do with the agent, while sharing
+the default is wrong but visibly so. **Scratch worktrees inherit the ant's
+environment**, because `trial()` and `proves_itself()` cut further worktrees to
+re-verify a patch and would otherwise measure a different world than the run
+did. **A release that throws does not cost the patch**: a leaked database is a
+nuisance, a lost patch is the run's whole output.
+
+**Verified under real concurrency** — three agents on a 2375-example Rails
+suite, 13.7 minutes, $0.92, three distinct candidate patches, all three
+verified in their own trees, all three proving themselves under
+`proves_itself`, zero clones and zero worktrees left behind. The same run
+exercised check detection end to end (it fell past `bundle exec rspec` at exit
+127 to the Ruby fallback with no `--check` given) and the green-repo framing
+("a pass after the run only means nothing broke"). First time competing briefs
+have run against a real application rather than a fixture.
+
 ### Finding the work (v0.8) — `playbooks/survey.py`
 
 Everything else here waits to be told what to do. This finds it, and it can
