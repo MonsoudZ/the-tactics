@@ -139,6 +139,9 @@ def test_it_warns_about_a_src_layout_with_no_pythonpath(tmp_path, capsys):
     # worktree, so an editable install measures the main tree instead.
     repo = _repo(tmp_path)
     pathlib.Path(repo, "src").mkdir()
+    # A real test, because a check that collects nothing is now refused before
+    # any warning is reached — it cannot measure the task either way.
+    pathlib.Path(repo, "test_x.py").write_text("def test_x():\n    assert True\n")
     main([repo, "t", "--check", "pytest -q", "--no-learn", "--no-persist", "--dry-run"],
          runner=_runner())
     assert "src/ layout with no pythonpath" in capsys.readouterr().err
@@ -155,6 +158,7 @@ def test_the_suggested_check_is_one_that_can_actually_run(tmp_path, capsys):
 
     repo = _repo(tmp_path)
     pathlib.Path(repo, "src").mkdir()
+    pathlib.Path(repo, "test_x.py").write_text("def test_x():\n    assert True\n")
     main([repo, "t", "--check", "pytest -q", "--no-learn", "--no-persist", "--dry-run"],
          runner=_runner())
     advice = capsys.readouterr().err.split("--check '")[1].split("'")[0]
@@ -181,10 +185,15 @@ def test_it_warns_that_uncommitted_work_is_invisible_to_the_agents(tmp_path, cap
     assert "worktrees are cut from HEAD" in capsys.readouterr().err
 
 
-def test_the_check_is_echoed_because_it_is_the_reward(tmp_path, capsys):
+def test_the_check_is_echoed_with_the_evidence_that_it_runs(tmp_path, capsys):
+    # It is not enough to repeat the command back: the check *is* the reward, so
+    # the CLI runs it once first and says so. A command that cannot execute
+    # fails looking exactly like a repository in need of repair.
     repo = _repo(tmp_path)
     main(_argv(repo, "--dry-run"), runner=_runner())
-    assert "this decides the reward" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "test -f work.txt" in out
+    assert "proven to run" in out
 
 
 # --- the knobs actually reach the machinery -----------------------------------

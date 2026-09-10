@@ -178,9 +178,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("repo", help="path to the git repository to work on")
     p.add_argument("task", nargs="?", default=None,
                    help="what you want done, in a sentence (omit with --report or --fix)")
-    p.add_argument("--check", default="pytest -q",
+    p.add_argument("--check", default=None,
                    help="the command that decides success. This *is* the reward — a wrong "
-                        "one measures the wrong thing (default: %(default)s)")
+                        "one measures the wrong thing. Detected from the repo when omitted, "
+                        "and proven to run either way before anything is spent")
     p.add_argument("--agents", type=int, default=1, metavar="N",
                    help="how many agents to run in parallel, each in its own worktree")
     p.add_argument("--rounds", type=int, default=1, help="attempts per agent (default: 1)")
@@ -306,6 +307,47 @@ def _from_report(repo: str, args) -> tuple[int | None, Any]:  # noqa: ANN001
     return None, job
 
 
+def _settle_check(repo: str, args) -> tuple[list[str], str]:  # noqa: ANN001
+    """The check to measure with, proven to run — or the reason to refuse.
+
+    Proven either way, detected or supplied. The check *is* the reward, and a
+    command that cannot execute does not fail loudly: it fails looking exactly
+    like a repository in need of repair, which is how a swarm ends up "fixing"
+    code to satisfy a missing binary. Refusing to start costs a minute; the
+    alternative costs a wrong answer that every downstream safeguard agrees with.
+    """
+    from .playbooks.checks import Check, attempt, choose
+
+    if args.check:
+        candidate = Check(shlex.split(args.check), "you asked for it", "given")
+        tried = attempt(repo, candidate)
+        if not tried.usable:
+            # Two different refusals, and saying which is the whole value: a
+            # command that never started is a typo or a missing tool, while one
+            # that collected nothing is a check an agent could satisfy by adding
+            # any passing test at all. Neither can measure the task.
+            return [], (f"tactics: that check cannot measure anything — "
+                        f"{candidate.detail}.\n"
+                        f"  {candidate.command}\n  → {tried.output.strip()[-300:] or '(no output)'}")
+        print(f"check   {candidate.command}   <- proven to run ({candidate.detail})")
+        args._baseline = tried.code == 0
+        return candidate.argv, ""
+
+    print(f"reading {repo} to work out how it is tested …", file=sys.stderr)
+    chosen, attempts = choose(repo)
+    if chosen is None:
+        lines = [f"  {a.check.command}\n      {a.check.detail}" for a in attempts]
+        return [], ("tactics: no check could be proven to run here, so there is nothing "
+                    "to measure against.\n" +
+                    ("\n".join(lines) if lines else
+                     "  nothing in this repo suggested a test command at all") +
+                    "\n  → pass one explicitly with --check")
+    print(f"check   {chosen.command}\n        chosen because {chosen.why}; "
+          f"proven to run in {chosen.seconds}s ({chosen.detail})")
+    args._baseline = chosen.ran and chosen.detail == "passed"
+    return chosen.argv, ""
+
+
 def _catch_terminate():
     """Make a SIGTERM raise, so the cleanup below it still runs.
 
@@ -390,7 +432,11 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:  # noqa: ANN001
     else:
         job = None
 
-    check = shlex.split(args.check)
+    check, problem = _settle_check(repo, args)
+    if problem:
+        print(problem, file=sys.stderr)
+        return 2
+    args.check = " ".join(check)
     if args.agents > 1 and args.dry_run:
         print("tactics: note — a dry run writes nothing, so parallel agents only "
               "produce parallel proposals", file=sys.stderr)
@@ -427,11 +473,14 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:  # noqa: ANN001
     # own work. Worth one run of the check to know which situation this is,
     # rather than reporting a green check as though it always meant the same
     # thing.
-    baseline_green = workspace.verify()[0] if not args.dry_run else None
+    # Known already: settling the check ran it once, and that answered both
+    # "can this measure anything" and "is it green right now". Running the whole
+    # suite a second time to learn what we were just told is a minute of a
+    # user's life for nothing.
+    baseline_green = getattr(args, "_baseline", None)
 
     print(f"repo    {repo}")
     print(f"task    {args.task}")
-    print(f"check   {' '.join(check)}   <- this decides the reward")
     print(f"posture {type(gate).__name__}   agents {args.agents}   budget ${args.budget:.2f}")
     if baseline_green is True:
         print("        your check already passes, so a pass after the run only means "

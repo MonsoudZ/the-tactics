@@ -538,6 +538,47 @@ tactics <repo> "<task>" --check "..."  # the front door: point the brain at any 
   HEAD that had moved two commits since: the first agent-authored change in
   this repository, and the archive doing exactly what it exists for.
 
+### Working out how to test it (v1.0) — `playbooks/checks.py`
+
+The check *is* the reward, and everything else is downstream of it being right,
+so the CLI no longer takes it on faith. With no `--check` it reads the repo and
+proposes commands — what the project *declares* (`npm test`, a Makefile target)
+before what its ecosystem implies — then **runs them and keeps the first that
+works**. A check you supply is proven the same way, and that run doubles as the
+baseline, so the whole suite is not run twice to learn what it just said.
+
+**"Works" is not "passes", and the burden sits on failure-to-start.** A red
+suite is a perfectly good check — that is a repository needing repair. The first
+version had this backwards: it demanded test-shaped output and rejected
+`test -f built.txt`, a fine check that exits 1 silently, as never having run.
+The OS answers most of it (127 is not-found, 126 is not-executable, and no test
+runner uses either for a failing suite); patterns then catch what starts and
+still cannot measure — `npm ERR! Missing script`, `LoadError`,
+`ModuleNotFoundError`.
+
+**And a check that collects nothing is not a check**, which is the rule that
+matters most. `pytest -q` in a repo with no tests exits 5 saying "no tests ran";
+an agent satisfies that by adding any passing test at all, which is never the
+task. The rule immediately caught one of *these notes'* own claims: the Ruby
+fallback was written `RSpec::Core::Runner.run([])` and declared proven against a
+real app — but the API does not default to `spec/` the way the binary does, so
+it had run **zero examples and exited 0**. Named explicitly now, it runs the
+real suite in 80s.
+
+Two escapes from real containers are built in, both found the hard way. Ruby
+gets a fallback through `ruby -e` because a gem home with no `bin/` makes
+`bundle exec rspec` exit 127 while rspec-core is plainly installed. Python
+prefers `python3 -m pytest` for the same reason, and a `src/` layout with no
+pythonpath gets `env PYTHONPATH=src …` first — the trap where an editable
+install silently measures the main tree instead of the worktree.
+
+When nothing can be proven, the CLI **refuses and says what it tried**. Refusing
+costs a minute; the alternative is a swarm working against a check that cannot
+measure anything, which fails looking exactly like a repository in need of
+repair. That is not hypothetical — a spec on a real app failed here only
+because this container's tzdata lacked the legacy timezone links, and agents
+handed that would have "fixed" production code to accommodate a missing symlink.
+
 ### Finding the work (v0.8) — `playbooks/survey.py`
 
 Everything else here waits to be told what to do. This finds it, and it can
