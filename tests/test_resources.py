@@ -152,3 +152,57 @@ def test_release_drops_the_clone(monkeypatch):
     resource.release()
     assert any(s.startswith("DROP DATABASE IF EXISTS") for s in statements)
     assert any("FORCE" in s for s in statements)     # a dead run leaves connections
+
+
+# --- a package inside a monorepo ----------------------------------------------
+
+
+def _monorepo(tmp_path) -> str:
+    repo = pathlib.Path(tmp_path, "mono")
+    pathlib.Path(repo, "packages", "api").mkdir(parents=True)
+    pathlib.Path(repo, "README.md").write_text("mono\n")
+    pathlib.Path(repo, "packages/api/app.rb").write_text("# app\n")
+    run = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, check=True)
+    run("init", "-q"); run("config", "user.email", "t@t"); run("config", "user.name", "t")
+    run("add", "-A"); run("commit", "-qm", "seed")
+    return str(repo)
+
+
+def test_an_ant_in_a_package_gets_its_resource_where_it_works(tmp_path):
+    # The two isolations have to meet: the worktree fix moved each ant's working
+    # directory into its package, and the environment carrying its database has
+    # to arrive *there* — a command run in the package must see it, not only one
+    # run at the checkout root.
+    repo = _monorepo(tmp_path)
+    ws = AgentWorkspace(str(pathlib.Path(repo, "packages", "api")), isolate=True,
+                        provision=env_per_ant(DATABASE_URL="postgres:///ant_{n}"))
+    try:
+        first, second = ws.session(None), ws.session(None)
+        assert first.path.endswith("packages/api")
+
+        code, out = first.run(["sh", "-c", "echo $DATABASE_URL; basename $PWD"])
+        assert code == 0
+        url, where = out.split()
+        assert url == "postgres:///ant_1"
+        assert where == "api"
+
+        # And two ants never share one, which is the whole point.
+        assert second.env["DATABASE_URL"] == "postgres:///ant_2"
+    finally:
+        ws.cleanup()
+
+
+def test_a_released_package_ant_gives_its_database_back(tmp_path):
+    released = []
+    repo = _monorepo(tmp_path)
+    ws = AgentWorkspace(str(pathlib.Path(repo, "packages", "api")), isolate=True,
+                        provision=lambda i, p: Resource(env={"X": str(i)},
+                                                        release=lambda: released.append(i)))
+    try:
+        session = ws.session(None)
+        pathlib.Path(session.path, "work.txt").write_text("done\n")
+        ws.release(session)
+        assert released == [1]
+        assert ws.patches[0].files == ["packages/api/work.txt"]
+    finally:
+        ws.cleanup()

@@ -903,3 +903,75 @@ def test_each_ant_measures_the_gauge_in_its_own_tree(tmp_path):
         assert seen == [session.path] and session.path != ws.path
     finally:
         ws.cleanup()
+
+
+# --- per-agent databases, and finding the template ----------------------------
+
+
+def _database_yml(root, body: str) -> None:
+    config = pathlib.Path(root, "config")
+    config.mkdir(parents=True, exist_ok=True)
+    pathlib.Path(config, "database.yml").write_text(body)
+
+
+_RAILS_YML = """default: &default
+  adapter: postgresql
+
+development:
+  <<: *default
+  database: app_development
+
+test:
+  <<: *default
+  database: app_test
+"""
+
+
+def test_the_template_is_read_from_the_package_not_the_repo_root(tmp_path, monkeypatch):
+    # A Rails app inside a monorepo keeps `config/database.yml` beside itself,
+    # and the CLI is pointed at the package, so this is the path that has to
+    # work. The repository root has no database.yml at all and must say so
+    # rather than guessing a name.
+    from tactics import cli
+
+    monkeypatch.setattr("tactics.playbooks.resources._psql", lambda sql, **kw: (0, ""))
+    repo = _repo(tmp_path)
+    package = pathlib.Path(repo, "packages", "api")
+    package.mkdir(parents=True)
+    _database_yml(package, _RAILS_YML)
+
+    assert cli._test_database(str(package)) == "app_test"
+    assert cli._test_database(repo) is None
+
+
+def test_a_template_that_does_not_exist_is_not_offered(tmp_path, monkeypatch):
+    # Cloning from a template that is not there fails every check for a reason
+    # that has nothing to do with the agent, so the name is only used once the
+    # database is known to exist.
+    from tactics import cli
+
+    monkeypatch.setattr("tactics.playbooks.resources._psql",
+                        lambda sql, **kw: (1, "no such database"))
+    repo = _repo(tmp_path)
+    _database_yml(repo, _RAILS_YML)
+    assert cli._test_database(repo) is None
+
+
+def test_a_computed_database_name_is_left_alone(tmp_path, monkeypatch):
+    # `database: <%= ENV["DB"] %>` is a value only Rails can resolve. Reading
+    # the ERB literally would name a database nobody has.
+    from tactics import cli
+
+    monkeypatch.setattr("tactics.playbooks.resources._psql", lambda sql, **kw: (0, ""))
+    repo = _repo(tmp_path)
+    _database_yml(repo, 'test:\n  database: <%= ENV["DB"] %>\n')
+    assert cli._test_database(repo) is None
+
+
+def test_one_agent_is_not_given_a_database_of_its_own(tmp_path):
+    # A single agent sharing the default database is the ordinary way to run a
+    # suite; cloning for it would be ceremony.
+    from tactics import cli
+
+    args = cli.build_parser().parse_args([str(tmp_path), "t", "--agents", "1"])
+    assert cli._provisioning(str(tmp_path), args) is None
