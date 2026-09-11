@@ -911,7 +911,16 @@ class AgentWorkspace(Target):
         return [p for p in paths if os.path.abspath(p) != mine]
 
     def cleanup(self) -> None:
-        """Remove every worktree this workspace created. Safe to call twice."""
+        """Remove the worktree root this workspace created. Safe to call twice.
+
+        Idempotent by design, and the CLI now relies on it: teardown has to
+        happen after `ApplyBestPatch` has re-verified its candidates, so the
+        call sits at the end of the `try` *and* in the `finally` that covers a
+        run which never got that far. Note `_add_worktree` makes a root lazily
+        and only when there is none, so a workspace used again after a cleanup
+        simply starts a fresh one — there is never more than a single root to
+        remove, which is why this does not track a list of them.
+        """
         with self._lock:
             root, self._worktree_root = self._worktree_root, None
             handle, self._owner_lock = self._owner_lock, None

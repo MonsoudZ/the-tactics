@@ -579,12 +579,15 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:  # noqa: ANN001
     previous = _catch_terminate()
     try:
         result, lessons = run_and_learn(colony, work_queue_goal(args.task), client=client)
+        # Inside the `try`, and before the report rather than after the run:
+        # `--apply` re-verifies each candidate in scratch worktrees, so tearing
+        # down here and reporting afterwards left the trials' own root behind.
+        # `cleanup` is idempotent, so the `finally` still covers a failed run.
+        return _report(args, workspace, result, lessons, client, why, gate,
+                       baseline_green=baseline_green)
     finally:
         workspace.cleanup()
         _restore_terminate(previous)
-
-    return _report(args, workspace, result, lessons, client, why, gate,
-                   baseline_green=baseline_green)
 
 
 def _report(args, workspace, result, lessons, client, why, gate,

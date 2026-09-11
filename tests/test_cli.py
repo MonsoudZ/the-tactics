@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 
+import os
 import pytest
 
 from tactics.cli import build_parser, main
@@ -76,6 +77,47 @@ def test_apply_lands_the_patch(tmp_path, capsys):
     assert main(_argv(repo, "--yes", "--apply"), runner=_runner()) == 0
     assert pathlib.Path(repo, "work.txt").read_text() == "done\n"
     assert "landed" in capsys.readouterr().out
+
+
+def test_applying_leaves_no_worktree_root_behind(tmp_path):
+    # The leak the live runs kept showing: `--apply` re-verifies each candidate
+    # in scratch worktrees, and the CLI tore the workspace down *before* the
+    # report rather than after it — so those trials started a second root that
+    # nothing ever removed. One empty directory holding a lock file per run,
+    # forever, and invisible because the worktrees inside it were cleaned up.
+    import glob
+    import tempfile
+
+    from tactics.playbooks.agent_sdk import WORKTREE_ROOT_PREFIX
+
+    pattern = os.path.join(tempfile.gettempdir(), WORKTREE_ROOT_PREFIX + "*")
+    before = set(glob.glob(pattern))
+    repo = _repo(tmp_path)
+    assert main(_argv(repo, "--yes", "--apply"), runner=_runner()) == 0
+    assert set(glob.glob(pattern)) == before
+
+
+def test_a_failed_run_is_still_cleaned_up(tmp_path):
+    # The teardown moved inside the `try` so it could run after the report;
+    # the `finally` still has to cover a run that never reached one.
+    import glob
+    import tempfile
+
+    from tactics.playbooks.agent_sdk import WORKTREE_ROOT_PREFIX
+
+    def explode(brief, spec, bridge, ws):
+        # A root already exists by now: `session()` made one to cut this ant's
+        # worktree. (Nothing in production cuts one from a *session* — `trial`
+        # runs on `ctx.target.root` and `proves_itself` on the main workspace —
+        # so the parent's roots are all there are to clean.)
+        raise KeyboardInterrupt("stopped")
+
+    pattern = os.path.join(tempfile.gettempdir(), WORKTREE_ROOT_PREFIX + "*")
+    before = set(glob.glob(pattern))
+    repo = _repo(tmp_path)
+    with pytest.raises(KeyboardInterrupt):
+        main(_argv(repo, "--yes"), runner=explode)
+    assert set(glob.glob(pattern)) == before
 
 
 def test_a_dry_run_writes_nothing_anywhere(tmp_path, capsys):

@@ -10,6 +10,7 @@ from __future__ import annotations
 from tactics import AutoApprove, Context, DryRun, Goal, Journal, PolicyGate
 from tactics.colony.blackboard import Task
 from tactics.playbooks.agent_sdk import (
+    WORKTREE_ROOT_PREFIX,
     AgentRun,
     AgentWorkspace,
     BriefSpec,
@@ -1778,3 +1779,38 @@ def test_the_main_tree_is_excluded_from_the_worktree_listing(tmp_path):
         assert len(listed) == 1
     finally:
         ws.cleanup()
+
+
+# --- the root a workspace has moved on from -----------------------------------
+
+
+def _roots_on_disk() -> set[str]:
+    import glob
+    import tempfile
+    return set(glob.glob(os.path.join(tempfile.gettempdir(), WORKTREE_ROOT_PREFIX + "*")))
+
+
+def test_a_workspace_used_again_after_cleanup_leaves_no_root(tmp_path):
+    # `_add_worktree` makes a root lazily, so a second use after a cleanup
+    # quietly starts a second one — which is exactly what `ApplyBestPatch` does,
+    # its trials running after the colony has been torn down. Cleaning only the
+    # *current* root left the first behind as a directory holding a lock file,
+    # one per run, forever.
+    before = _roots_on_disk()
+    ws = AgentWorkspace(_git_repo(tmp_path), isolate=True)
+    try:
+        ws.session(None)
+        ws.cleanup()            # the colony is done
+        ws._add_worktree(prefix="trial")   # …and then a patch is re-verified
+    finally:
+        ws.cleanup()
+    assert _roots_on_disk() == before
+
+
+def test_cleanup_twice_over_is_still_nothing(tmp_path):
+    before = _roots_on_disk()
+    ws = AgentWorkspace(_git_repo(tmp_path), isolate=True)
+    ws.session(None)
+    ws.cleanup()
+    ws.cleanup()
+    assert _roots_on_disk() == before

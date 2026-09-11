@@ -293,6 +293,25 @@ than leaving a dead one's. Deliberately out of scope: a root belonging to a
 by a run that died before its first worktree — sweeping those would mean
 deleting directories this repo never registered.
 
+**Every completed run also used to leave one empty root**, holding nothing but
+its lock file — invisible, because the worktrees *inside* it were cleaned up
+correctly, and so only noticed by checking `/tmp` after a live run rather than
+by reading the report. The cause was an ordering one: the CLI tore the workspace
+down in a `finally` around the colony, and then `--apply` re-verified each
+candidate in scratch worktrees, which made a *second* root nothing ever removed.
+Teardown now sits at the end of the `try`, after the report, with the `finally`
+still covering a run that never got that far — which is what `cleanup()` being
+idempotent is for.
+
+Worth recording how the fix got smaller. The first version also had `cleanup()`
+track every root it had ever made, as defence in depth. Probing the new tests
+against the pre-fix code showed three of four passing either way, and the reason
+is the point: `_add_worktree` creates a root only when there is none, so **at
+most one exists at a time** and the list could never remove anything the single
+root wouldn't. It was machinery whose test could not fail. Removed — the
+ordering was the whole fix, and a guarantee the code structure already provides
+does not need a mechanism restating it.
+
 **Fan-out (verified live: 3 agents, 62s, 3 *distinct* patches, main repo
 untouched).** Set `AgentWorkspace(isolate=True)` and `max_workers > 1`; the
 unsafe combination is refused, not warned about. `spread=True` (the default)
