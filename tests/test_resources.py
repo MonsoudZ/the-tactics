@@ -96,12 +96,18 @@ def test_a_scratch_tree_inherits_the_ants_environment(tmp_path):
     # those ran against the default database the verification would measure a
     # different world than the run did.
     ws = AgentWorkspace(_repo(tmp_path), isolate=True, provision=env_per_ant(SLOT="{n}"))
+    session = ws.session(None)
     try:
-        session = ws.session(None)
         scratch = session._add_worktree(prefix="trial")
         assert scratch.env == session.env
-        session.run(["git", "worktree", "remove", "--force", scratch.path])
     finally:
+        # The session made a worktree root of its own, and only it can clean
+        # that up — `ws.cleanup()` reaches the parent's root, not a child's.
+        # Nothing in production cuts a worktree from a session (`trial` runs on
+        # `ctx.target.root`, `proves_itself` on the main workspace), so this is
+        # the test tidying up after itself rather than a gap in the code. It
+        # was leaking one empty root per suite run until it did.
+        session.cleanup()
         ws.cleanup()
 
 

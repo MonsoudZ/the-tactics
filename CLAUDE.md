@@ -672,6 +672,34 @@ $0.13, both verified, smallest landed, `packages/web` red → green, `packages/a
 untouched and still red, the diff scoped to one file, no worktrees left and no
 warnings raised.
 
+**And with per-agent databases, on a real Rails app in a package** — the two
+isolations exercised together, which is the combination that had never been
+run. `config/database.yml` is read beside the package rather than at the
+repository root, which is the path that matters since the CLI is pointed at the
+package. 649 files, a 2375-example suite, check auto-detected through the Ruby
+fallback and proven in 94.3s, `intentia_api_test` discovered and cloned per ant
+(35 tables each, so `CREATE DATABASE … TEMPLATE` spares the migrations), both
+ants working in `packages/api`, $0.29. The two ants reached *different* verdicts
+on the same task — one verified, one turn-exhausted and still failing — which is
+the point of the per-ant database: under a shared one those failures would
+belong to nobody. Patches scoped to `packages/api/…`, template intact
+afterwards, zero clones and zero worktrees left, and the scribe wrote a
+comparative lesson about the turn budget.
+
+Two defects it surfaced, both unfixed and worth knowing. The CLI prints *"each
+agent gets its own clone"* **before attempting any clone**, and a failed clone's
+reason is never printed — so a run where cloning failed reports that each agent
+had its own database while they all quietly share the default. The degradation
+is safe by design; the sentence is what lies. And `trial`/`proves_itself` run on
+the *root* workspace, whose `env` is never provisioned, so for a Rails app they
+connect to the **template** — and `CREATE DATABASE … TEMPLATE` refuses while any
+connection is held (*"source database is being accessed by other users"*,
+confirmed directly). Within one run the phases are sequential so it does not
+bite; across two overlapping runs on one repo — which the worktree lock
+explicitly allows — the second run's provisioning fails, silently, via the first
+defect. Note this also means the claim above that scratch worktrees inherit the
+ant's environment holds for the tested path and not the one production takes.
+
 ### Per-ant resources (v1.1) — `playbooks/resources.py`
 
 A git worktree isolates files and nothing else, which is why every run against
